@@ -1,0 +1,12 @@
+streamlit>=1.49
+pandas>=2.0
+numpy>=1.26
+plotly>=5.20
+yfinance>=0.2.40
+python-dotenv>=1.0
+requests>=2.31
+
+# --- v4: ニュース/AIを第一級サポート。OpenAIは実質必須（推奨） ---
+openai>=1.40
+# anthropic は任意（OpenAIの代替として使う場合のみ）
+# anthropic>=0.40
