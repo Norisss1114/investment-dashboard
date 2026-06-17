@@ -25,6 +25,10 @@ def get_secret(name: str, default: str = "") -> str:
 
 
 APP_TITLE = "中期投資 判断コックピット v2（教育・分析用）"
+# v14.5: スマホ向けの短縮タイトル
+APP_TITLE_SHORT = "投資コックピット"
+APP_SUBTITLE = "今日の判断"
+APP_VERSION = "v14.5"
 
 DEFAULT_WATCHLIST = ["NVDA", "AMD", "AVGO", "PLTR", "VST", "GEV", "CEG", "XOM", "CCJ", "MRVL"]
 

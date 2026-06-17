@@ -5,8 +5,6 @@ plotly>=5.20
 yfinance>=0.2.40
 python-dotenv>=1.0
 requests>=2.31
-
 openai>=1.40
 anthropic>=0.40
-
 matplotlib>=3.9

@@ -864,37 +864,75 @@ from modules import moomoo_import as mm_mod
 from modules import holding_action as ha_mod2
 
 
-def _sync_editor_block():
-    """スクショ読取/手入力 → 編集 → 検証 を行い (clean, errors, warns) を返す。"""
-    vision = mm_mod.vision_available()
-    if vision:
-        st.success("🟢 Anthropic Vision 利用可（画像から自動読み取り）")
-    else:
-        st.warning("🟡 ANTHROPIC_API_KEY 未設定 → 手入力補助モード。下の表に直接入力できます。")
+def _sync_input_tabs():
+    """v14.5: 3つの入力方法（画像読取 / コピペ同期 / 手入力）をタブで提供。
+    読み取り結果は st.session_state['moomoo_rows'] に格納し、下の確認テーブルへ流す。"""
+    tab_img, tab_paste, tab_manual = st.tabs(["📷 画像読取", "📋 コピペ同期", "✏️ 手入力"])
 
-    up = st.file_uploader("保有画面のスクショ (png / jpg / jpeg)", type=["png", "jpg", "jpeg"])
-    if up is not None:
-        st.image(up, caption="アップロード画像", width='stretch')
-    c = st.columns(2)
-    if c[0].button("🔍 画像を解析して読み取る", disabled=(up is None or not vision), width='stretch'):
-        rows, err = mm_mod.parse_screenshot(up.getvalue(), up.type or "image/png")
-        if err:
-            st.error(err)
-        if rows:
-            st.session_state["moomoo_rows"] = rows
+    with tab_img:
+        vision = mm_mod.vision_available()
+        if vision:
+            st.success("🟢 Anthropic Vision 利用可（画像から自動読み取り）")
+        else:
+            st.info("ANTHROPIC_API_KEY 未設定のため画像解析は使えません。『コピペ同期』か『手入力』をご利用ください。")
+        up = st.file_uploader("保有画面のスクショ (png / jpg / jpeg)", type=["png", "jpg", "jpeg"], key="mm_upload")
+        if up is not None:
+            st.image(up, caption="アップロード画像", width='stretch')
+        if st.button("🔍 画像を解析して読み取る", disabled=(up is None or not vision),
+                     width='stretch', key="mm_btn_img"):
+            rows, err = mm_mod.parse_screenshot(up.getvalue(), up.type or "image/png")
+            if err:
+                st.error(err)
+            if rows:
+                st.session_state["moomoo_rows"] = rows
+                st.session_state.pop("moomoo_editor", None)
+                st.rerun()
+        st.caption("画像解析は失敗することがあります。うまくいかない時は『コピペ同期』が確実です。")
+
+    with tab_paste:
+        st.caption("Moomooの保有画面からコピーしたテキスト、またはCSV風テキストを貼り付けてください。")
+        with st.expander("貼り付け例（タップで表示）", expanded=False):
+            st.markdown("**Moomooコピー形式（銘柄名→ティッカー→数値）**")
+            st.code("Kura Sushi\nKRUS\n30.8639\n48.60\n1553.69\n\n"
+                    "Truist Financial\nTFC\n20.077\n49.31\n973.33")
+            st.markdown("**CSV形式（ヘッダー行あり）**")
+            st.code("ticker,name,qty,avg_cost,current_price,market_value\n"
+                    "KRUS,Kura Sushi,30.8639,48.60,50.34,1553.69\n"
+                    "TFC,Truist Financial,20.077,49.31,48.48,973.33")
+        txt = st.text_area("貼り付けテキスト", key="mm_paste_text", height=170,
+                           placeholder="ここにMoomooの保有テキスト/CSVを貼り付け…")
+        if st.button("📋 テキストを読み取る", disabled=not (txt or "").strip(),
+                     width='stretch', key="mm_btn_paste"):
+            rows, err = mm_mod.parse_pasted_text(txt)
+            if err:
+                st.error(err)
+            if rows:
+                st.session_state["moomoo_rows"] = rows
+                st.session_state.pop("moomoo_editor", None)
+                st.success(f"{len(rows)} 件を読み取りました。下の表で確認・修正してください。")
+                st.rerun()
+
+    with tab_manual:
+        st.caption("空の表に手入力します。下の確認テーブルで直接編集・行追加できます。")
+        if st.button("✏️ 空の表を用意する", width='stretch', key="mm_btn_manual"):
+            st.session_state["moomoo_rows"] = [mm_mod.empty_row()]
             st.session_state.pop("moomoo_editor", None)
             st.rerun()
-    if c[1].button("✏️ 空の表で手入力", width='stretch'):
-        st.session_state["moomoo_rows"] = [mm_mod.empty_row()]
-        st.session_state.pop("moomoo_editor", None)
-        st.rerun()
 
+
+def _sync_editor_table():
+    """読み取り結果（どのタブ由来でも）を確認・修正し (clean, errors, warns) を返す。"""
     rows = st.session_state.get("moomoo_rows", [mm_mod.empty_row()])
     base = pd.DataFrame(rows)
     for col in mm_mod.MOOMOO_FIELDS:
         if col not in base.columns:
             base[col] = ("" if col in ("ticker", "name") else 0)
     base = base[mm_mod.MOOMOO_FIELDS]
+    # コピペ/CSV由来の文字列を数値・文字列に正規化（NumberColumn対策）
+    for col in ("quantity", "average_cost", "current_price", "market_value"):
+        base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0.0)
+    for col in ("ticker", "name"):
+        base[col] = base[col].astype(str).replace("nan", "")
 
     st.markdown("**読み取り結果（確認・修正してください）**")
     edited = st.data_editor(
@@ -917,10 +955,11 @@ def _sync_editor_block():
 
 def render_moomoo_sync():
     st.header("📷 Moomoo 同期")
-    st.caption("スクショで読み取った保有を positions.json と差分比較し、同期保存します。"
-               "毎日スクショは不要 — 初回登録/新規買い/買い増し/一部売却/全売却のときだけ実行してください。")
+    st.caption("保有を読み取って positions.json と差分比較し、同期保存します。"
+               "毎日は不要 — 初回登録/新規買い/買い増し/一部売却/全売却のときだけ実行してください。")
 
-    clean, errors, warns = _sync_editor_block()
+    _sync_input_tabs()
+    clean, errors, warns = _sync_editor_table()
     st.caption(f"読み取り {len(clean)} 件" + ("（エラーがあるため同期できません）" if errors else ""))
 
     # ---------- 差分比較 ----------
@@ -1628,21 +1667,45 @@ def _stars(score):
     return "★" * n + "☆" * (5 - n)
 
 
-def _hold_attention(positions, rmap, regime):
-    """危険/利確/損切り/決算接近の保有だけ抽出。"""
+# v14.5: 保有アクション → スマホ向けの短いラベル（売る/継続/注意/利確/損切り）
+_HOLD_LABEL = {
+    "継続保有":     ("継続",   "#16a34a"),
+    "一部利確":     ("利確",   "#0ea5e9"),
+    "全利確":       ("売る",   "#06b6d4"),
+    "損切り":       ("損切り", "#dc2626"),
+    "危険":         ("注意",   "#b91c1c"),
+    "買い増し禁止": ("注意",   "#f97316"),
+    "ニュース確認": ("注意",   "#a855f7"),
+}
+# v14.5: ウォッチ判定 → 買う/待つ/見送り
+_WATCH_LABEL = {"強いBUY": ("買う", "#15803d"), "BUY": ("買う", "#16a34a"),
+                "WATCH": ("待つ", "#eab308"), "AVOID": ("見送り", "#dc2626")}
+
+
+def _hold_label(action):
+    return _HOLD_LABEL.get(action, ("継続", "#16a34a"))
+
+
+def _watch_label(verdict):
+    return _WATCH_LABEL.get(verdict, ("待つ", "#64748b"))
+
+
+def _hold_overview(positions, rmap, regime):
+    """全保有銘柄について {ticker, pl_pct, action, label, color, todo, attention} を返す。"""
     out = []
     for pos in positions:
         t = pos["ticker"].upper()
         ev = pf_home.evaluate_position(pf_home._normalize(pos), rmap.get(t))
         hd = ha_home.decide(ev, regime["regime"])
+        label, color = _hold_label(hd["action"])
         ed = ev.get("earnings_days")
-        attention = hd["action"] in ("危険", "損切り", "一部利確", "全利確", "買い増し禁止", "ニュース確認") \
-            or (ed is not None and 0 <= ed <= 14)
-        if attention:
-            out.append({"ticker": t, "pl_pct": ev.get("pl_pct"), "action": hd["action"],
-                        "todo": ha_home.moomoo_todo(ev, hd),
-                        "color": "#dc2626" if hd["action"] in ("危険", "損切り") else "#f97316"
-                        if hd["action"] in ("買い増し禁止", "ニュース確認", "一部利確", "全利確") else "#eab308"})
+        attention = hd["action"] != "継続保有" or (ed is not None and 0 <= ed <= 14)
+        out.append({"ticker": t, "pl_pct": ev.get("pl_pct"), "action": hd["action"],
+                    "label": label, "color": color, "todo": ha_home.moomoo_todo(ev, hd),
+                    "earnings_days": ed, "attention": attention})
+    # 損切り→注意/利確/売る→継続 の順に上へ
+    pri = {"損切り": 0, "注意": 1, "利確": 2, "売る": 3, "継続": 4}
+    out.sort(key=lambda x: pri.get(x["label"], 9))
     return out
 
 
@@ -1651,69 +1714,107 @@ def render_home(regime, events, positions, rmap):
     grade, gcolor = _grade(score100)
     mode = regime.get("regime", "中立"); mcolor = _mode_color(mode)
     attack = mode in ("強気", "やや強気")
+    cur_wl = wl_current()
 
-    st.markdown(f"## 🏠 今日の投資コックピット")
-    st.caption("5秒で『市場・買う候補・保有対応』が分かるホーム。詳細は各ページへ。")
+    # ===== データ準備 =====
+    holds = _hold_overview(positions, rmap, regime) if positions else []
+    attn = [h for h in holds if h["attention"]]
+    week = events[0] if isinstance(events, tuple) else (events or [])
+    week = [e for e in week if 0 <= e.get("days", 99) <= 7]
+    cache = disc_home.load_cache()
+    top3 = (cache.get("top20", [])[:3] if cache else [])
 
-    # ===== 投資ダッシュボード =====
+    # ===== 1. 今日やること（最上部・最重要） =====
+    st.markdown("### ✅ 今日やること")
+    todos = []  # (color, html)
+    for h in (attn or holds)[:3]:
+        todos.append((h["color"], f'<b>{h["ticker"]}</b>：{h["label"]}。{h["todo"]}'))
+    if top3 and top3[0].get("verdict") in ("強いBUY", "BUY"):
+        t0 = top3[0]
+        todos.append(("#16a34a", f'<b>新規買い</b>：{t0["ticker"]} を ${t0.get("entry")} で指値（損切り ${t0.get("stop")}）'))
+    elif attack:
+        todos.append(("#0ea5e9", "<b>新規買い</b>：押し目なら買い検討（市場は強気）"))
+    else:
+        todos.append(("#64748b", "<b>新規買い</b>：今日は押し目待ち（無理に買わない）"))
+    for e in week[:2]:
+        todos.append(("#f97316", f'<b>{e["title"]}</b> を確認（あと{e["days"]}日）'))
+    if not positions:
+        todos.append(("#64748b", "📷 <b>Moomoo同期</b>で保有銘柄を登録してください"))
+    if not cur_wl:
+        todos.append(("#64748b", "🔎 <b>銘柄検索</b>または<b>おすすめ監視銘柄</b>からウォッチ追加してください"))
     with st.container(border=True):
-        c = st.columns([1.2, 1, 1])
-        c[0].markdown(f'<div style="font-size:0.85rem;color:#8a8a8e;">投資スコア</div>'
-                      f'<div style="font-size:2.6rem;font-weight:800;letter-spacing:-0.03em;">{score100}'
-                      f'<span style="font-size:1rem;color:#8a8a8e;"> / 100</span></div>', unsafe_allow_html=True)
-        c[1].markdown(f'<div style="font-size:0.85rem;color:#8a8a8e;">市場モード</div>'
-                      f'<div style="font-size:1.6rem;font-weight:800;color:{mcolor};">{"🟢" if attack else "🟡" if mode=="中立" else "🔴"} {mode}</div>',
-                      unsafe_allow_html=True)
-        c[2].markdown(f'<div style="font-size:0.85rem;color:#8a8a8e;">総合評価</div>'
-                      f'<div style="font-size:2.6rem;font-weight:800;color:{gcolor};">{grade}</div>', unsafe_allow_html=True)
-        st.caption(("今日は攻めてよい日（押し目は買い検討）。" if attack else "守り気味の日。全力買いは控えて押し目待ち。")
-                   + f"　推奨現金比率 {regime.get('cash_pct','—')}%・新規買い上限 {regime.get('new_buy_pct','—')}%")
-        sr = strat_home.resolved()
-        if sr["active"]:
-            st.caption("🧪 " + strat_home.label_line())
+        for i, (color, td) in enumerate(todos[:6], 1):
+            st.markdown(f'<div style="border-left:4px solid {color};padding:3px 0 3px 10px;margin-bottom:4px;">'
+                        f'<b>{i}.</b> {td}</div>', unsafe_allow_html=True)
+
+    # ===== 2. 市場モード（コンパクトカード／スマホでも折り返して1画面に収まる） =====
+    kpis = [
+        ("投資スコア", str(score100), "/100", "#1d1d1f"),
+        ("市場モード", f'{"🟢" if attack else "🟡" if mode=="中立" else "🔴"}{mode}', "", mcolor),
+        ("総合評価", grade, "", gcolor),
+        ("新規買い", f'{regime.get("new_buy_pct","—")}%', "上限", "#1d1d1f"),
+        ("現金比率", f'{regime.get("cash_pct","—")}%', "推奨", "#1d1d1f"),
+    ]
+    chips = '<div style="display:flex;flex-wrap:wrap;gap:8px;margin:2px 0 6px;">'
+    for label, val, sub, color in kpis:
+        chips += (f'<div style="flex:1 1 92px;min-width:92px;background:#f7f7fa;border-radius:14px;padding:8px 11px;">'
+                  f'<div style="font-size:0.7rem;color:#8a8a8e;">{label}</div>'
+                  f'<div style="font-size:1.2rem;font-weight:800;color:{color};line-height:1.25;">{val}'
+                  f'<span style="font-size:0.68rem;color:#aaa;font-weight:600;"> {sub}</span></div></div>')
+    chips += '</div>'
+    st.markdown(chips, unsafe_allow_html=True)
+    st.caption(("今日は攻めてよい日（押し目は買い検討）。" if attack else "守り気味の日。全力買いは控えて押し目待ち。"))
+    sr = strat_home.resolved()
+    if sr["active"]:
+        st.caption("🧪 " + strat_home.label_line())
 
     # ===== 空状態（保有もウォッチも無い） =====
-    cur_wl = wl_current()
     if not positions and not cur_wl:
         with st.container(border=True):
-            st.markdown("#### はじめに")
-            st.info("まずは **📷 Moomoo同期** で保有銘柄を登録するか、サイドバーの **🔎 銘柄検索** でウォッチリストに追加してください。")
-        render_suggested(key_prefix="homesug0", title="💡 おすすめ監視銘柄")
-        st.caption("⚠️ 分析補助であり投資助言ではありません。発注はMoomooでご自身が手動で。")
+            st.markdown("##### 💡 おすすめ監視銘柄から始める")
+            render_suggested(key_prefix="homesug0", title="")
+        with st.expander("ℹ️ このホームの見方・免責", expanded=False):
+            _home_help()
         return
 
-    # ===== 保有中 =====
+    # ===== 3. 保有中（売る/継続/注意/利確/損切り） =====
     if positions:
         st.markdown("##### 💼 保有中")
-        st.markdown(" ".join(f'<span style="background:#e7f5ee;border-radius:8px;padding:3px 10px;margin:2px;">{p["ticker"].upper()}</span>'
-                             for p in positions), unsafe_allow_html=True)
+        for h in holds:
+            with st.container(border=True):
+                cc = st.columns([1.1, 1, 2.7])
+                pl = h["pl_pct"]
+                cc[0].markdown(f'<b style="font-size:1.05rem;">{h["ticker"]}</b>', unsafe_allow_html=True)
+                cc[1].markdown((f'<span style="color:{"#16a34a" if (pl or 0)>=0 else "#dc2626"};font-weight:700;">{pl:+.1f}%</span>'
+                                if pl is not None else "—"), unsafe_allow_html=True)
+                cc[2].markdown(f'<span style="background:{h["color"]};color:white;padding:2px 9px;border-radius:8px;'
+                               f'font-size:0.82rem;font-weight:700;">{h["label"]}</span> '
+                               f'<span style="font-size:0.82rem;color:#555;">{h["todo"]}</span>', unsafe_allow_html=True)
+    else:
+        st.info("📷 保有銘柄が未登録です。『Moomoo同期』で取り込めます。")
 
-    # ===== 買い候補（ウォッチリスト） =====
+    # ===== 4. 買い候補（ウォッチ：買う/待つ/見送り） =====
     if cur_wl:
-        st.markdown("##### ⭐ 買い候補（ウォッチリスト）")
-        chips = []
+        st.markdown("##### ⭐ 買い候補（ウォッチ）")
+        chips = '<div style="display:flex;flex-wrap:wrap;gap:6px;">'
         for t in cur_wl:
             a = rmap.get(t)
             vd = (a.get("scores", {}).get("verdict") if a and a.get("ok") else None)
-            color = _disc_color(vd) if vd else "#64748b"
-            chips.append(f'<span style="background:{color};color:white;border-radius:8px;padding:3px 10px;margin:2px;">{t}{(" "+vd) if vd else ""}</span>')
-        st.markdown(" ".join(chips), unsafe_allow_html=True)
+            label, color = _watch_label(vd)
+            chips += (f'<span style="background:{color};color:white;border-radius:10px;padding:4px 11px;'
+                      f'font-size:0.9rem;font-weight:700;">{t}・{label}</span>')
+        chips += '</div>'
+        st.markdown(chips, unsafe_allow_html=True)
+    else:
+        st.info("🔎 買い候補（ウォッチ）が未登録です。下のおすすめか、サイドバーの銘柄検索から追加できます。")
 
-    # ===== 今週の注意イベント =====
-    week = events[0] if isinstance(events, tuple) else (events or [])
-    week = [e for e in week if 0 <= e.get("days", 99) <= 7]
-    if week:
-        st.markdown("##### 📅 今週の注意イベント")
-        ev_cols = st.columns(min(3, len(week)))
-        for col, e in zip(ev_cols, week[:3]):
-            col.markdown(f'<div style="background:#f7f7fa;border-radius:12px;padding:10px 12px;">'
-                         f'<b>{e["title"]}</b><br><span style="color:#f97316;">あと{e["days"]}日</span></div>',
-                         unsafe_allow_html=True)
+    # ===== 5. おすすめ監視銘柄（ウォッチ未登録なら） =====
+    if not cur_wl:
+        with st.container(border=True):
+            render_suggested(key_prefix="homesug", title="💡 おすすめ監視銘柄（未登録・タップで追加）")
 
     # ===== 今日の買い候補 TOP3 =====
     st.markdown("##### 🛒 今日の買い候補 TOP3")
-    cache = disc_home.load_cache()
-    top3 = (cache.get("top20", [])[:3] if cache else [])
     medals = ["🥇", "🥈", "🥉"]
     if top3:
         cols = st.columns(len(top3))
@@ -1721,58 +1822,25 @@ def render_home(regime, events, positions, rmap):
             vc = _disc_color(it["verdict"])
             with col:
                 with st.container(border=True):
-                    st.markdown(f'<div style="font-size:1.3rem;font-weight:800;">{md} {it["ticker"]}'
-                                f'<span style="font-size:0.85rem;color:{vc};"> {it["verdict"]}</span></div>'
-                                f'<div style="color:#8a8a8e;font-size:0.8rem;">{it.get("name","")}｜スコア {it["score"]}・{_stars(it["score"])}</div>',
+                    st.markdown(f'<div style="font-size:1.15rem;font-weight:800;">{md} {it["ticker"]}'
+                                f'<span style="font-size:0.8rem;color:{vc};"> {it["verdict"]}</span></div>'
+                                f'<div style="color:#8a8a8e;font-size:0.78rem;">{it.get("name","")}｜スコア {it["score"]}</div>',
                                 unsafe_allow_html=True)
-                    for rsn in it.get("reasons", [])[:2]:
-                        st.markdown(f'<div style="font-size:0.85rem;">・{rsn}</div>', unsafe_allow_html=True)
-                    st.markdown(f'<div style="margin-top:6px;font-size:0.85rem;color:#16a34a;font-weight:700;">'
-                                f'今日：{it.get("action","")}（買い ${it.get("entry")}）</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div style="margin-top:4px;font-size:0.82rem;color:#16a34a;font-weight:700;">'
+                                f'買い ${it.get("entry")}</div>', unsafe_allow_html=True)
     else:
-        st.info("発掘データがありません。『🔍 銘柄発掘』でスキャンするとTOP3が表示されます。")
+        st.caption("発掘データなし。『🔍 銘柄発掘』でスキャンするとTOP3が出ます。")
 
-    # ===== おすすめ監視銘柄（ウォッチ未登録なら） =====
-    if not cur_wl:
-        with st.container(border=True):
-            render_suggested(key_prefix="homesug", title="💡 おすすめ監視銘柄（未登録）")
+    with st.expander("ℹ️ このホームの見方・免責", expanded=False):
+        _home_help()
 
-    # ===== 保有で要確認 =====
-    st.markdown("##### 💼 保有で要確認")
-    attn = _hold_attention(positions, rmap, regime) if positions else []
-    if attn:
-        for h in attn:
-            with st.container(border=True):
-                cc = st.columns([1, 1, 2.4])
-                pl = h["pl_pct"]
-                cc[0].markdown(f'<b style="font-size:1.1rem;">{h["ticker"]}</b>', unsafe_allow_html=True)
-                cc[1].markdown(f'<span style="color:{"#16a34a" if (pl or 0)>=0 else "#dc2626"};font-weight:700;">'
-                               f'{pl:+.1f}%</span>' if pl is not None else "—", unsafe_allow_html=True)
-                cc[2].markdown(f'<span style="background:{h["color"]};color:white;padding:1px 8px;border-radius:6px;font-size:0.8rem;">'
-                               f'{h["action"]}</span> <span style="font-size:0.85rem;">{h["todo"]}</span>', unsafe_allow_html=True)
-    elif positions:
-        st.success("要確認の保有はありません（継続保有でOK）。")
-    else:
-        st.info("保有銘柄が未登録です。『📷 Moomoo同期』で取り込めます。")
 
-    # ===== 今日やること（最重要） =====
-    st.markdown("##### ✅ 今日やること")
-    todos = []
-    if top3:
-        t0 = top3[0]
-        if t0["verdict"] in ("強いBUY", "BUY"):
-            todos.append(f"{t0['ticker']} を ${t0.get('entry')} で指値注文（損切り ${t0.get('stop')}）")
-    for h in attn[:3]:
-        todos.append(f"{h['ticker']}：{h['action']} — {h['todo']}")
-    for e in week[:2]:
-        todos.append(f"{e['title']} を確認（あと{e['days']}日）")
-    if not todos:
-        todos.append("特に必須アクションなし。市場環境とウォッチを軽くチェック。")
-    with st.container(border=True):
-        for i, td in enumerate(todos[:6], 1):
-            st.markdown(f'<div style="padding:3px 0;"><b>{i}.</b> {td}</div>', unsafe_allow_html=True)
-
-    st.caption("⚠️ 分析補助であり投資助言ではありません。発注はMoomooでご自身が手動で。")
+def _home_help():
+    st.markdown("- **✅ 今日やること** … 最優先のアクション（上から順に対応）\n"
+                "- **💼 保有中** … positions.json の銘柄。判定は 売る／継続／注意／利確／損切り\n"
+                "- **⭐ 買い候補（ウォッチ）** … 自分で追加した監視銘柄。判定は 買う／待つ／見送り\n"
+                "- **💡 おすすめ** … 未登録の提案銘柄（タップでウォッチ追加）")
+    st.caption("⚠️ 教育・分析目的のツールです。投資助言ではありません。発注はMoomooでご自身が手動で。")
 
 
 # ================================================================== v14.1: ウォッチリスト管理
@@ -1813,19 +1881,24 @@ def wl_has(ticker):
 
 
 def render_suggested(key_prefix="sug", title="💡 おすすめ監視銘柄"):
-    """おすすめ監視銘柄をグループ別カードで表示（押した銘柄だけウォッチ追加）。"""
+    """おすすめ監視銘柄をカテゴリ別のチップ（ボタン）で表示。押した銘柄だけウォッチ追加。"""
     cur = set(wl_current())
-    st.markdown(f"**{title}**")
-    st.caption("初回用の提案です。自動登録はしません。押したものだけウォッチに入ります。")
+    if title:
+        st.markdown(f"**{title}**")
+    st.caption("カテゴリ別の提案。自動登録はしません。タップした銘柄だけウォッチに入ります。")
     for group, tickers in config.SUGGESTED_WATCHLIST.items():
-        st.caption(group)
-        for t in tickers:
+        st.markdown(f'<div style="font-size:0.8rem;color:#8a8a8e;margin:6px 0 2px;">{group}</div>',
+                    unsafe_allow_html=True)
+        ncol = min(4, max(1, len(tickers)))
+        cols = st.columns(ncol)
+        for i, t in enumerate(tickers):
+            col = cols[i % ncol]
             name = config.TICKER_NAMES.get(t, t)
-            cc = st.columns([3, 1.4])
-            cc[0].markdown(f'<span style="font-size:0.9rem;">**{t}** · {name}</span>', unsafe_allow_html=True)
             if t in cur:
-                cc[1].caption("✅ 登録済み")
-            elif cc[1].button("＋追加", key=f"{key_prefix}_{t}"):
+                col.button(f"✓ {t}", key=f"{key_prefix}_{t}", disabled=True,
+                           width='stretch', help=f"{name}（登録済み）")
+            elif col.button(f"＋ {t}", key=f"{key_prefix}_{t}",
+                            width='stretch', help=f"{name} をウォッチに追加"):
                 wl_add(t)
 
 

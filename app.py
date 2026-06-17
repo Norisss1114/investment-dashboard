@@ -84,8 +84,42 @@ def main():
     }
     section[data-testid="stSidebar"] [data-testid="stExpander"] { border: none; box-shadow: none; }
     section[data-testid="stSidebar"] [data-testid="stExpander"] summary { font-weight: 700; font-size: 0.95rem; }
+
+    /* v14.5: コンパクトヘッダー（スマホでも読む画面にしない） */
+    .app-header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 0 0 6px 0; }
+    .app-header .app-title { font-size: 1.5rem; font-weight: 800; letter-spacing: -0.02em; color: #1d1d1f; }
+    .app-header .app-sub { font-size: 0.95rem; font-weight: 600; color: #8a8a8e; }
+
+    /* v14.5: 全体的に少し小さく＋カード余白を減らす */
+    h1 { font-size: 1.7rem; }
+    h2 { font-size: 1.3rem; }
+    h3 { font-size: 1.1rem; }
+    div[data-testid="stVerticalBlockBorderWrapper"] > div { padding: 0.2rem 0; }
+    div[data-testid="stVerticalBlockBorderWrapper"] { padding: 0.5rem 0.7rem; }
+
+    /* v14.5: 横スクロール禁止（テーブルは個別に許容） */
+    html, body { overflow-x: hidden; }
+    .main .block-container { overflow-x: hidden; }
+    div[data-testid="stDataFrame"], div[data-testid="stDataEditor"] { overflow-x: auto; }
+
     @media (max-width: 640px) {
       section[data-testid="stSidebar"] .stButton > button { min-height: 56px; font-size: 17px; }
+      /* タイトル縮小 */
+      .app-header .app-title { font-size: 1.25rem; }
+      .app-header .app-sub { font-size: 0.85rem; }
+      h1 { font-size: 1.35rem; }
+      h2 { font-size: 1.15rem; }
+      h3 { font-size: 1.0rem; }
+      /* フォント16〜17px・読みやすく */
+      html, body, [class*="css"], .stMarkdown, p, li { font-size: 16px; }
+      /* カード余白を減らす */
+      .block-container { padding-top: 1.0rem; padding-left: 0.6rem; padding-right: 0.6rem; }
+      div[data-testid="stVerticalBlockBorderWrapper"] { padding: 0.4rem 0.6rem; }
+      /* メインのボタン高さ56px前後・押しやすく */
+      .main .stButton > button { min-height: 52px; font-size: 16px; }
+      /* メトリクスをコンパクトに */
+      div[data-testid="stMetricValue"] { font-size: 1.05rem; }
+      div[data-testid="stMetricLabel"] { font-size: 0.75rem; }
     }
     </style>
     """, unsafe_allow_html=True)
@@ -98,18 +132,17 @@ def main():
             ("✅ ウォッチリストに追加・保存しました: " if kind == "ok"
              else "⚠️ 追加しましたが保存に失敗: ") + ", ".join(picks))
 
-    st.title("📊 " + config.APP_TITLE)
-    st.caption("中期投資の『発注前の分析』＋『保有後の管理』を補助。⚠️ 投資助言ではありません。発注前にMoomooで最新値を確認。")
+    # v14.5: コンパクトなヘッダー（スマホでは大きなタイトルをやめる）
+    st.markdown(
+        f'<div class="app-header">'
+        f'<span class="app-title">📊 {config.APP_TITLE_SHORT}</span>'
+        f'<span class="app-sub">{config.APP_SUBTITLE}</span>'
+        f'</div>', unsafe_allow_html=True)
 
-    # v4: ニュース/AIキーの状態バナー
+    # v14.5: APIキーが致命的に不足しているときだけ軽く知らせる（強い警告にしない）
     ks = news_mod.news_status()
-    if not ks["fully_ready"]:
-        miss = " ・ ".join(ks["missing"]) or "APIキー"
-        st.info(f"🔑 未設定: **{miss}**。Streamlit Cloudでは **Secrets**、ローカルでは `.env`/環境変数に設定すると"
-                "実ニュース＋AI分類でスコアの信頼性が上がります（未設定でも代替モードで動作します）。")
-    else:
-        ai_name = "OpenAI" if ks["openai"] else "Anthropic"
-        st.success(f"🔑 フル機能稼働: Finnhub + {ai_name}（ニュース比重 {config.SCORE_WEIGHTS['news']}点）")
+    if not ks["finnhub"]:
+        st.caption("🔑 Finnhub未設定 — 実ニュースは代替モードで動作中。詳細は下部「API状態」へ。")
 
     positions = portfolio.load_positions()
 
@@ -143,15 +176,20 @@ def main():
                                        st.session_state.risk_pct, st.session_state.max_pos_pct)
             st.success("保存しました。") if ok else st.error("保存失敗。")
 
-        st.subheader("APIキー状況（v4推奨）")
+        # v14.5: API状態は折りたたみ（目立たせない）。OpenAIは任意扱い。
         s = news_mod.news_status()
-        st.write(f"- Finnhub: {'✅' if s['finnhub'] else '❌ 未設定'}")
-        st.write(f"- OpenAI: {'✅' if s['openai'] else '❌ 未設定'}")
-        st.write(f"- Anthropic(任意): {'✅' if s['anthropic'] else '—'}")
-        if s["fully_ready"]:
-            st.success("フル機能で稼働中")
-        else:
-            st.caption("未設定でも代替モードで動作（精度は下がります）")
+        with st.expander("🔑 API状態", expanded=False):
+            st.write(f"- Finnhub {'✅' if s['finnhub'] else '❌ 未設定'}")
+            st.write(f"- Anthropic {'✅' if s['anthropic'] else '❌ 未設定'}")
+            ai_ok = s['anthropic'] or s['openai']
+            st.write(f"- OpenAI {'✅' if s['openai'] else '任意'}")
+            if s['finnhub'] and ai_ok:
+                st.caption("フル機能で稼働中")
+            elif ai_ok:
+                st.caption("AI分析は稼働中（Finnhub未設定でも動作します）")
+            else:
+                st.caption("未設定でも代替モードで動作します（精度は下がります）")
+            st.caption("設定の優先順位: Streamlit Secrets → 環境変数 / .env")
 
     # 市場 & 分析（ウォッチ＋保有の和集合）
     macro_data = macro.get_market_indices()
