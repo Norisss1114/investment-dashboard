@@ -843,6 +843,11 @@ def render_holding_monitor(rmap, positions, regime):
 # ---------------------------------------------------------------- v16: 目標達成プラン
 _FEAS_COLOR = {"現実的": "#16a34a", "やや難しい": "#eab308", "かなり難しい": "#f97316", "非現実的": "#dc2626"}
 _ROLE_COLOR = {"主力": "#15803d", "成長枠": "#0ea5e9", "守り枠": "#64748b", "短期狙い": "#f59e0b", "見送り": "#dc2626"}
+# v16.1: 保有/ウォッチの役割語彙の色
+_ROLE_COLOR2 = {
+    "継続": "#16a34a", "利確候補": "#0ea5e9", "損切り候補": "#dc2626", "見直し": "#f59e0b",
+    "新規買い候補": "#15803d", "押し目待ち": "#eab308", "見送り": "#94a3b8",
+}
 
 
 def render_goal_plan(rmap, positions, regime, capital):
@@ -853,30 +858,57 @@ def render_goal_plan(rmap, positions, regime, capital):
 
     saved = gp_mod.load_goal() or {}
 
+    # v16.1: 保有評価額を自動算出（既存 evaluate_position を再利用。価格ロジックは変更しない）
+    held_evals = []  # (ev, hd)
+    holdings_value = 0.0
+    for p in positions:
+        ev = pf_mod.evaluate_position(pf_mod._normalize(p), rmap.get(p["ticker"].upper()))
+        hd = ha_mod.decide(ev, regime.get("regime", "中立"))
+        held_evals.append((ev, hd))
+        holdings_value += ev.get("value", 0) or 0
+    holdings_value = round(holdings_value, 2)
+
     # ---------- 入力（カード型） ----------
     with st.container(border=True):
         st.markdown("##### 📝 目標を入力")
+        # --- 現在資産：保有評価額(自動) ＋ 現金残高(手入力) ---
+        a = st.columns(2)
+        a[0].metric("保有評価額（自動）", f"${holdings_value:,.0f}")
+        cash_balance = a[1].number_input("現金残高 ($)", min_value=0.0, step=100.0,
+                                         value=float(saved.get("cash_balance", 0.0)), key="gp_cash")
+        auto_total = round(holdings_value + cash_balance, 2)
+        override = st.checkbox("現在資産を手動で上書きする", value=bool(saved.get("override_assets", False)),
+                               key="gp_override",
+                               help="Moomooと実際の口座残高がズレる場合にON。OFFなら『保有評価額＋現金』を自動使用します。")
+        if override:
+            current_assets = st.number_input("現在資産 ($)（手動上書き）", min_value=0.0, step=500.0,
+                                             value=float(saved.get("current_assets", auto_total) or auto_total),
+                                             key="gp_current")
+        else:
+            current_assets = auto_total
+            st.metric("現在資産合計（自動）", f"${current_assets:,.0f}")
+        st.caption(f"内訳：保有評価額 ${holdings_value:,.0f} ＋ 現金 ${cash_balance:,.0f} = ${auto_total:,.0f}"
+                   + ("　/　現在は手動上書き中" if override else ""))
+
         c1 = st.columns(2)
-        current_assets = c1[0].number_input("現在資産 ($)", min_value=0.0, step=500.0,
-                                             value=float(saved.get("current_assets", capital or 2000.0)), key="gp_current")
-        goal_amount = c1[1].number_input("目標金額 ($)", min_value=0.0, step=500.0,
+        goal_amount = c1[0].number_input("目標金額 ($)", min_value=0.0, step=500.0,
                                          value=float(saved.get("goal_amount", 10000.0)), key="gp_goal")
-        c2 = st.columns(2)
         hz_opts = list(gp_mod.HORIZONS.keys())
-        horizon = c2[0].selectbox("期限", hz_opts,
+        horizon = c1[1].selectbox("期限", hz_opts,
                                   index=hz_opts.index(saved.get("horizon", "1年")) if saved.get("horizon") in hz_opts else 2,
                                   key="gp_horizon")
-        monthly_add = c2[1].number_input("毎月追加資金 ($)", min_value=0.0, step=50.0,
+        c2 = st.columns(2)
+        monthly_add = c2[0].number_input("毎月追加資金 ($)", min_value=0.0, step=50.0,
                                          value=float(saved.get("monthly_add", 0.0)), key="gp_monthly")
-        c3 = st.columns(3)
-        risk_tol = c3[0].selectbox("リスク許容度", gp_mod.RISK_TOLERANCES,
+        risk_tol = c2[1].selectbox("リスク許容度", gp_mod.RISK_TOLERANCES,
                                    index=gp_mod.RISK_TOLERANCES.index(saved.get("risk_tolerance", "中"))
                                    if saved.get("risk_tolerance") in gp_mod.RISK_TOLERANCES else 1, key="gp_risk")
+        c3 = st.columns(2)
         ml_opts = [f"{x}%" for x in gp_mod.MAX_LOSS_CHOICES]
         ml_default = f'{int(saved.get("max_loss_pct", 10))}%'
-        max_loss = c3[1].selectbox("最大許容損失", ml_opts,
+        max_loss = c3[0].selectbox("最大許容損失", ml_opts,
                                    index=ml_opts.index(ml_default) if ml_default in ml_opts else 1, key="gp_maxloss")
-        style = c3[2].selectbox("投資スタイル", gp_mod.STYLES,
+        style = c3[1].selectbox("投資スタイル", gp_mod.STYLES,
                                 index=gp_mod.STYLES.index(saved.get("style", "バランス"))
                                 if saved.get("style") in gp_mod.STYLES else 1, key="gp_style")
 
@@ -960,24 +992,47 @@ def render_goal_plan(rmap, positions, regime, capital):
                 else:
                     st.caption("このプランに合う候補がありませんでした。")
 
-    # ---------- 銘柄候補（役割つき） ----------
-    if candidates:
-        st.markdown("##### 📋 銘柄候補（役割・推奨配分）")
-        rows, skipped = gp_mod.candidate_rows(candidates, comp)
-        for c in rows:
+    # ---------- 銘柄候補（保有とウォッチを分けて表示） ----------
+    # 💼 保有銘柄：継続/利確候補/損切り候補/見直し ＋ 目標達成への貢献度
+    if held_evals:
+        st.markdown("##### 💼 保有銘柄（役割・目標への貢献度）")
+        for ev, hd in held_evals:
+            role = gp_mod.holding_role(hd.get("action"))
+            value = ev.get("value", 0) or 0
+            pl_pct = ev.get("pl_pct")
+            contrib = round(value / goal_amount * 100, 1) if goal_amount else 0.0
+            with st.container(border=True):
+                cc = st.columns([1.3, 1, 2.2])
+                cc[0].markdown(f'<b>{ev["ticker"]}</b> <span style="color:#8a8a8e;font-size:0.78rem;">'
+                               f'${ev.get("current")}</span>', unsafe_allow_html=True)
+                cc[1].markdown(f'<span style="background:{_ROLE_COLOR2.get(role,"#64748b")};color:white;'
+                               f'border-radius:8px;padding:2px 8px;font-size:0.78rem;font-weight:700;">{role}</span>',
+                               unsafe_allow_html=True)
+                pls = (f'{pl_pct:+.1f}%' if pl_pct is not None else "—")
+                cc[2].markdown(f'<span style="font-size:0.82rem;">評価額 ${value:,.0f}・含み損益 {pls}'
+                               f'・目標貢献度 {contrib}%</span>', unsafe_allow_html=True)
+                st.caption(f'{hd.get("action","")}：{hd.get("reason","")}')
+
+    # ⭐ ウォッチ銘柄：新規買い候補/押し目待ち/見送り
+    watch_cands = [c for c in candidates if not c.get("held")]
+    if watch_cands:
+        st.markdown("##### ⭐ ウォッチ・候補銘柄（新規買い候補/押し目待ち/見送り）")
+        for c in watch_cands[:12]:
+            wrole = gp_mod.watch_role(c.get("verdict"), c.get("score"))
             with st.container(border=True):
                 cc = st.columns([1.3, 1, 2.2])
                 cc[0].markdown(f'<b>{c["ticker"]}</b> <span style="color:#8a8a8e;font-size:0.78rem;">'
                                f'${c["price"]}</span>', unsafe_allow_html=True)
-                cc[1].markdown(f'<span style="background:{_ROLE_COLOR.get(c["role"],"#64748b")};color:white;'
-                               f'border-radius:8px;padding:2px 8px;font-size:0.78rem;font-weight:700;">{c["role"]}</span>',
+                cc[1].markdown(f'<span style="background:{_ROLE_COLOR2.get(wrole,"#64748b")};color:white;'
+                               f'border-radius:8px;padding:2px 8px;font-size:0.78rem;font-weight:700;">{wrole}</span>',
                                unsafe_allow_html=True)
-                cc[2].markdown(f'<span style="font-size:0.82rem;">スコア {c["score"]:.0f}・投入 ${c["amount"]:,.0f}'
-                               f'（{c["shares"]}株）・貢献度 {c["contribution"]}%</span>', unsafe_allow_html=True)
-                detail = (f'エントリー ${c["entry"]}・損切り ${c["stop"]}・利確1 ${c["tp1"]}・利確2 ${c["tp2"]}')
-                st.caption(detail + (f'　⚠️ {c["note"]}' if c.get("note") else ""))
-        if skipped:
-            st.caption("見送り（スコア低/AVOID）: " + ", ".join(s["ticker"] for s in skipped[:12]))
+                cc[2].markdown(f'<span style="font-size:0.82rem;">スコア {c["score"]:.0f}・'
+                               f'エントリー ${c["entry"]}・損切り ${c["stop"]}・利確1 ${c["tp1"]}</span>',
+                               unsafe_allow_html=True)
+                if c.get("note"):
+                    st.caption(f'⚠️ {c["note"]}')
+    if not held_evals and not watch_cands:
+        st.caption("候補銘柄がありません。ウォッチ追加・Moomoo同期・銘柄発掘スキャンで提案が増えます。")
 
     # ---------- 注意点 ----------
     with st.container(border=True):
@@ -990,6 +1045,10 @@ def render_goal_plan(rmap, positions, regime, capital):
     # ---------- 保存 ----------
     if st.button("💾 この目標プランを保存", width='stretch', key="gp_save"):
         payload = dict(inputs)
+        # v16.1: 現在資産の内訳も保存（後方互換：読込側は .get で既定値）
+        payload["cash_balance"] = cash_balance
+        payload["holdings_value"] = holdings_value
+        payload["override_assets"] = bool(override)
         payload["summary"] = {
             "goal_amount": comp["goal_amount"], "req_monthly": comp["req_monthly"],
             "req_annual": comp["req_annual"], "feasibility": comp["feasibility"], "score": comp["score"],

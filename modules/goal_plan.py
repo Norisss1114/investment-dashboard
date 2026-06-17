@@ -187,6 +187,29 @@ def _rec_from_analysis(t, a, held):
             "name": f.get("name", t)}
 
 
+# v16.1: 保有/ウォッチを分けた役割語彙（表示用）
+_HOLDING_ROLE = {
+    "損切り": "損切り候補",
+    "危険": "見直し", "ニュース確認": "見直し", "買い増し禁止": "見直し", "決算前に減らす": "見直し",
+    "一部利確": "利確候補", "全利確": "利確候補",
+    "継続保有": "継続", "買い増し検討": "継続",
+}
+
+
+def holding_role(action):
+    """保有アクション(holding_action.decide の action) → 継続/利確候補/損切り候補/見直し。"""
+    return _HOLDING_ROLE.get(action, "継続")
+
+
+def watch_role(verdict, score=0):
+    """ウォッチ判定 → 新規買い候補/押し目待ち/見送り。"""
+    if verdict in ("強いBUY", "BUY"):
+        return "新規買い候補"
+    if verdict == "AVOID" or (score or 0) < 48:
+        return "見送り"
+    return "押し目待ち"
+
+
 def _rec_from_discovery(it, held):
     price = it.get("entry") or 0
     if not price or price <= 0:
