@@ -48,38 +48,193 @@ def _factor_lines(snap, ni):
     return lines
 
 
-def quality_score(df, snap, news_res):
-    """シナリオ品質スコア(0-100)＋理由（E）。AI解析が無くてもテクニカルで参考になる配点。"""
+def quality_score(df, snap, news_res, fund=None, e_days=None, vol_risk=None):
+    """シナリオ品質スコア(0-100)＋理由（E）。
+    上限95・通常60〜85・データ不足40〜60。ボラ高/決算接近で減点。AI無しでも下げすぎない。"""
     snap = snap or {}
     news_res = news_res or {}
+    fund = fund or {}
     score = 0
     reasons = []
     n = len(df) if df is not None else 0
     if n >= 200:
-        score += 30; reasons.append("データ十分")
+        score += 35; reasons.append("データ十分")
     elif n >= 60:
-        score += 22; reasons.append("データやや十分")
+        score += 25; reasons.append("データやや十分")
     elif n >= 20:
-        score += 12; reasons.append("データ少なめ")
+        score += 14; reasons.append("データ少なめ")
     else:
-        score += 4; reasons.append("データ不足")
+        score += 5; reasons.append("データ不足")
     if (snap.get("vol_avg") or 0) > 0:
-        score += 25; reasons.append("出来高十分")
+        score += 25; reasons.append("出来高安定")
     else:
         score += 8; reasons.append("出来高データ薄い")
     src = news_res.get("source")
     if src and src not in ("mock", "skip", None):
-        score += 25; reasons.append("実ニュースあり")
+        score += 20; reasons.append("ニュースあり")
     else:
         score += 8; reasons.append("ニュースはサンプル/無し")
     if news_res.get("classifier") == "ai":
-        score += 20; reasons.append("AI解析あり")
+        score += 13; reasons.append("AI解析あり")
     else:
-        score += 10; reasons.append("テクニカル中心")
-    return {"score": int(min(100, score)), "reasons": reasons}
+        score += 8; reasons.append("テクニカル中心")
+    if fund.get("target") and fund.get("price") and fund["target"] != fund["price"]:
+        score += 7; reasons.append("目標株価あり")
+    # 減点（不確実性）
+    if vol_risk is not None and vol_risk >= 60:
+        score -= 8; reasons.append("ボラ高で減点")
+    if e_days is not None and 0 <= e_days <= 7:
+        score -= 8; reasons.append("決算接近で減点")
+    score = int(max(40, min(95, score)))  # 下限40・上限95
+    return {"score": score, "reasons": reasons}
 
 
-def compute_scenarios(price, df, snap, net_impact=0.0, days=20):
+# ============================================================ v17.2: プロアナリスト風スコア & 到達確率
+def _norm_cdf(z):
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def prob_reach(price, level, vol, days, tilt=0.0, up=True):
+    """シナリオ上の到達目安（終端確率ベースの簡易推定・断定ではない）。
+    対数正規モデル：到達方向に tilt 由来のドリフトを少しだけ反映。返り値 0〜100（取得不可None）。"""
+    try:
+        price = float(price); level = float(level)
+        if price <= 0 or level <= 0 or not vol or vol <= 0:
+            return None
+        sigma = vol * math.sqrt(max(1, int(days)))
+        if sigma <= 0:
+            return None
+        mu = (max(-35.0, min(35.0, tilt)) / 35.0) * 0.5 * sigma  # 強気ほど上方ドリフト
+        z = (math.log(level / price) - mu) / sigma
+        p = (1.0 - _norm_cdf(z)) if up else _norm_cdf(z)
+        return int(round(max(0.0, min(1.0, p)) * 100))
+    except Exception:
+        return None
+
+
+def _clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def analyst_score(r):
+    """rmap の1銘柄 r から、プロ風サブスコア(0-100)8項目と合成傾き tilt(-35..+35) を返す。
+    ファンダ/ニュースは scores.raw を流用（再計算しない）。read-only。"""
+    snap = r.get("snap") or {}
+    fund = r.get("fund") or {}
+    scores = r.get("scores") or {}
+    raw = scores.get("raw") or {}
+    plan = r.get("plan") or {}
+    price = fund.get("price") or 0
+    rsi = snap.get("rsi", 50) or 50
+    vr = snap.get("vol_ratio", 1) or 1
+    mh = snap.get("macd_hist", 0) or 0
+
+    # トレンド：移動平均の位置と並び
+    trend = 0
+    trend += 25 if snap.get("above_sma20") else 0
+    trend += 25 if snap.get("above_sma50") else 0
+    trend += 30 if snap.get("above_sma200") else 0
+    if (snap.get("sma20") or 0) > (snap.get("sma50") or 0):
+        trend += 10
+    if (snap.get("sma50") or 0) > (snap.get("sma200") or 0):
+        trend += 10
+    trend = _clamp(trend, 0, 100)
+
+    # モメンタム：RSI＋MACD方向
+    rsi_part = _clamp((rsi - 30) / 40.0 * 100, 0, 100)  # 30→0, 70→100
+    macd_part = 72 if mh > 0 else 28 if mh < 0 else 50
+    momentum = _clamp(round(rsi_part * 0.6 + macd_part * 0.4), 0, 100)
+
+    # 出来高：20日平均比
+    volume = int(_clamp(50 + (vr - 1) * 70, 10, 95))
+
+    # ニュース／ファンダ：scores.raw を流用（0-1 → 0-100）
+    news = int(_clamp((raw.get("news", 0.5) or 0.5) * 100, 0, 100)) if "news" in raw \
+        else int(_clamp(50 + (r.get("news_sum", {}) or {}).get("avg_impact", 0) * 10, 0, 100))
+    fundamental = int(_clamp((raw.get("fundamental", 0.5) or 0.5) * 100, 0, 100))
+
+    # 決算リスク（高いほど危険）
+    e_days = plan.get("earnings_days")
+    if e_days is None:
+        earnings_risk = 0
+    elif e_days < 0:
+        earnings_risk = 0
+    elif e_days <= 3:
+        earnings_risk = 90
+    elif e_days <= 7:
+        earnings_risk = 70
+    elif e_days <= 14:
+        earnings_risk = 40
+    else:
+        earnings_risk = 15
+
+    # ボラティリティリスク（高いほど危険）：日次ボラ近似
+    vol = None
+    df = r.get("df")
+    try:
+        if df is not None and len(df) >= 10:
+            v = float(df["Close"].pct_change().tail(20).std())
+            if v and v == v and v > 0:
+                vol = v
+    except Exception:
+        vol = None
+    vol_risk = int(_clamp((vol or 0.02) * 1500, 5, 95))
+
+    # 目標株価余地
+    target = fund.get("target") or 0
+    if target and price:
+        upside = (target / price - 1) * 100
+        target_room = int(_clamp(40 + upside * 2.5, 0, 100))
+    else:
+        target_room = 50
+
+    sub = {"trend": int(trend), "momentum": int(momentum), "volume": volume,
+           "news": news, "fundamental": fundamental, "earnings_risk": earnings_risk,
+           "volatility_risk": vol_risk, "target_room": target_room}
+
+    # 合成方向（強気＋／弱気−）。risk は方向を中立へ引き戻す。
+    direction = ((trend - 50) * 0.28 + (momentum - 50) * 0.22 + (news - 50) * 0.20
+                 + (fundamental - 50) * 0.15 + (target_room - 50) * 0.15)
+    tilt = _clamp(direction * 0.7, -35, 35)
+    risk_factor = 1.0 - 0.3 * (earnings_risk / 100.0) - 0.2 * (vol_risk / 100.0)
+    tilt = round(tilt * risk_factor, 1)
+
+    return {"subscores": sub, "tilt": tilt, "vol": vol, "vol_risk": vol_risk,
+            "earnings_days": e_days, "target": target, "price": price}
+
+
+def analyst_summary(scen, ascore, held=False):
+    """総評（判定/主確率/注目価格/投資行動）。"""
+    b = scen["bull"]["prob"]; ne = scen["neutral"]["prob"]; be = scen["bear"]["prob"]
+    diff = b - be
+    if diff >= 25:
+        jd = "強気"
+    elif diff >= 10:
+        jd = "やや強気"
+    elif diff <= -25:
+        jd = "弱気"
+    elif diff <= -10:
+        jd = "やや弱気"
+    else:
+        jd = "中立"
+    main_label, main_prob = max([("強気", b), ("中立", ne), ("弱気", be)], key=lambda x: x[1])
+    up_level = scen["bull"]["range"][0]      # ここを上抜けると強気継続
+    down_level = scen["bear"]["range"][1]    # ここを割れると弱気転換
+    snap_rsi = None
+    e_days = ascore.get("earnings_days")
+    if jd in ("強気", "やや強気"):
+        action = "保有継続・利確準備" if held else "押し目待ち（新規は分割）"
+    elif jd == "中立":
+        action = "様子見・押し目待ち"
+    else:
+        action = "損切り警戒・利確準備" if held else "見送り"
+    if e_days is not None and 0 <= e_days <= 7:
+        action += "／決算接近で縮小検討"
+    return {"judgment": jd, "main_label": main_label, "main_prob": main_prob,
+            "up_level": up_level, "down_level": down_level, "action": action}
+
+
+def compute_scenarios(price, df, snap, net_impact=0.0, days=20, tilt=None):
     """強気/中立/弱気シナリオを計算して返す。
     返り値: {ok, price, days, vol, data_insufficient, bull/neutral/bear:{label,prob,range,mid,path,desc}}
     確率は必ず合計100%。"""
@@ -119,16 +274,18 @@ def compute_scenarios(price, df, snap, net_impact=0.0, days=20):
         tech_tilt += 4
     ni = float(net_impact or 0)
 
-    # v17.1: ホライズン減衰。長期ほど確信(tilt/news)を弱め、不確実性(弱気)を少しだけ上げる。
+    # v17.1: ホライズン減衰。長期ほど確信を弱め、不確実性(弱気)を少しだけ上げる。
+    # v17.2: tilt(アナリスト合成傾き -35..+35) が渡れば、それで強弱のメリハリを出す。
     damp = math.sqrt(20.0 / max(1, int(days)))   # 20d=1.0 / 40d≈0.71 / 60d≈0.58
     unc = 1.0 - damp                              # 20d=0 / 40d≈0.29 / 60d≈0.42
+    eff = float(tilt) if tilt is not None else (ni * 4 + tech_tilt)
     if data_insufficient:
         bull_p, bear_p = 25, 25  # 中立を高めに
     else:
-        bull_p = 33 + (ni * 4 + tech_tilt) * damp - unc * 8   # 長期ほど強気の確信を弱める
-        bear_p = 33 - (ni * 4 + tech_tilt) * damp + unc * 10  # 長期ほど弱気(不確実性)を少し上げる
-    bull_p = int(max(10, min(70, bull_p)))
-    bear_p = int(max(10, min(70, bear_p)))
+        bull_p = 33 + eff * damp - unc * 6
+        bear_p = 33 - eff * damp + unc * 8
+    bull_p = int(max(8, min(70, bull_p)))   # 上限70%
+    bear_p = int(max(8, min(70, bear_p)))
     neutral_p = max(5, 100 - bull_p - bear_p)
     tot = bull_p + bear_p + neutral_p
     bull_p = round(bull_p / tot * 100)

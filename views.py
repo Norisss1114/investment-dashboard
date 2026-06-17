@@ -241,8 +241,12 @@ def render_ranking(results, regime, positions=None, rmap=None):
 _SCEN_META = {"bull": ("強気", "#16a34a"), "neutral": ("中立", "#9ca3af"), "bear": ("弱気", "#dc2626")}
 
 
-def _render_scenario_forecast(r, ticker, f, psrc):
-    """個別銘柄分析の既存チャート下に『未来シナリオ予測』を追加（v17）。"""
+_JD_COLOR = {"強気": "#15803d", "やや強気": "#16a34a", "中立": "#9ca3af",
+             "やや弱気": "#f97316", "弱気": "#dc2626"}
+
+
+def _render_scenario_forecast(r, ticker, f, psrc, positions=None):
+    """個別銘柄分析の既存チャート下に『未来シナリオ予測（アナリスト風）』を追加（v17/v17.2）。"""
     st.markdown("#### 🔮 未来シナリオ予測")
     price = f.get("price")
     # 現在値が取れない/仮値のときは予測しない
@@ -252,19 +256,36 @@ def _render_scenario_forecast(r, ticker, f, psrc):
 
     days = st.selectbox("予測期間", [20, 40, 60], index=0,
                         format_func=lambda d: f"{d}営業日", key=f"scen_days_{ticker}")
+    # v17.2: アナリスト合成スコア → tilt でメリハリのある確率配分
+    ascore = scen_mod.analyst_score(r)
     net_impact = (r.get("news_sum") or {}).get("avg_impact", 0) or 0
-    scen = scen_mod.compute_scenarios(price, r.get("df"), r.get("snap") or {}, net_impact, days)
+    scen = scen_mod.compute_scenarios(price, r.get("df"), r.get("snap") or {}, net_impact, days,
+                                      tilt=ascore["tilt"])
+    held = any(p["ticker"].upper() == ticker.upper() for p in (positions or []))
+    summary = scen_mod.analyst_summary(scen, ascore, held=held)
 
     if psrc == "mock" or f.get("is_sample"):
         st.caption("※サンプルデータによる参考シナリオです。")
     if scen.get("data_insufficient"):
         st.caption("※価格データが不足しているため、中立寄り・概算レンジで表示しています。")
 
-    # E: シナリオ品質スコア（予測信頼度）
-    q = scen_mod.quality_score(r.get("df"), r.get("snap") or {}, r.get("news") or {})
-    st.markdown(f'**予測信頼度 {q["score"]} / 100**　'
-                f'<span style="font-size:0.8rem;color:#8a8a8e;">{" ・ ".join(q["reasons"])}</span>',
-                unsafe_allow_html=True)
+    # G: 🧠 アナリスト風総評
+    jd = summary["judgment"]; jc = _JD_COLOR.get(jd, "#64748b")
+    q = scen_mod.quality_score(r.get("df"), r.get("snap") or {}, r.get("news") or {},
+                               fund=f, e_days=ascore.get("earnings_days"), vol_risk=ascore.get("vol_risk"))
+    with st.container(border=True):
+        st.markdown(f'🧠 **{ticker} アナリスト風総評**')
+        st.markdown(
+            f'<div style="font-size:0.9rem;">'
+            f'シナリオ判定：<b style="color:{jc};">{jd}</b>　|　'
+            f'主確率：<b>{summary["main_label"]} {summary["main_prob"]}%</b>　|　'
+            f'予測信頼度：<b>{q["score"]}/100</b></div>'
+            f'<div style="font-size:0.86rem;margin-top:4px;">注目価格：'
+            f'<span style="color:#16a34a;">${summary["up_level"]} 上抜けで強気継続</span> / '
+            f'<span style="color:#dc2626;">${summary["down_level"]} 割れで弱気転換</span></div>'
+            f'<div style="font-size:0.86rem;margin-top:4px;">投資行動：<b>{summary["action"]}</b></div>',
+            unsafe_allow_html=True)
+        st.caption("信頼度の理由：" + " ・ ".join(q["reasons"]))
 
     fig = scen_mod.build_scenario_chart(r.get("df"), ticker, scen, days)
     if fig is not None:
@@ -281,25 +302,58 @@ def _render_scenario_forecast(r, ticker, f, psrc):
             f'<span style="font-size:0.82rem;color:#8a8a8e;">理由：{s["desc"]}</span></div>',
             unsafe_allow_html=True)
 
+    # B: スコア分解（0〜100）
+    with st.expander("🧮 アナリスト風スコア分解（0〜100）", expanded=False):
+        sub = ascore["subscores"]
+        labels = [("トレンド", "trend"), ("モメンタム", "momentum"), ("出来高", "volume"),
+                  ("ニュース", "news"), ("ファンダメンタル", "fundamental"),
+                  ("決算リスク", "earnings_risk"), ("ボラリスク", "volatility_risk"), ("目標株価余地", "target_room")]
+        gc = st.columns(2)
+        for i, (lab, k) in enumerate(labels):
+            gc[i % 2].markdown(f'- {lab}：**{sub[k]}**')
+        st.caption(f"合成傾きスコア：{ascore['tilt']:+.1f}（+で強気寄り / −で弱気寄り、±35が上限）")
+
     # C: シナリオ根拠（使った指標）
     with st.expander("📊 シナリオの根拠（使用した指標）", expanded=False):
         for line in scen.get("factors", []):
             st.markdown(f"- {line}")
 
-    # D: アナリスト目標株価との比較（target がある時だけ）
+    # D: 目標株価到達確率（target がある時だけ）
+    vol = ascore.get("vol")
     target = f.get("target")
     if target and target > 0 and price > 0:
         up_room = (target / price - 1) * 100
-        bear_lo = scen["bear"]["range"][0]
-        down_room = (bear_lo / price - 1) * 100
-        st.markdown("**🎯 目標株価との比較**")
+        st.markdown("**🎯 目標株価到達確率（シナリオ上の到達目安）**")
         tc = st.columns(4)
         tc[0].metric("現在値", f"${price:,.2f}")
         tc[1].metric("目標株価", f"${target:,.2f}")
         tc[2].metric("上昇余地", f"{up_room:+.1f}%")
-        tc[3].metric("弱気下限まで", f"{down_room:+.1f}%")
+        p_t = scen_mod.prob_reach(price, target, vol, days, ascore["tilt"], up=(target >= price))
+        tc[3].metric(f"{days}日到達目安", f"{p_t}%" if p_t is not None else "—")
+        st.caption("20/40/60営業日: " + " / ".join(
+            f"{d}日 {scen_mod.prob_reach(price, target, vol, d, ascore['tilt'], up=(target>=price))}%"
+            for d in (20, 40, 60)))
 
-    st.caption("⚠️ これは現在のテクニカル・ニュースから作るシナリオ分岐であり、将来を保証するものではありません。"
+    # E: 保有銘柄の利確/損切り到達確率（holding_monitor.price_levels を read-only 流用）
+    if held:
+        try:
+            pos = next(p for p in positions if p["ticker"].upper() == ticker.upper())
+            ev = pf_mod.evaluate_position(pf_mod._normalize(pos), r)
+            lv = hm_mod.price_levels(ev)
+            st.markdown("**💰 利確 / 損切り 到達確率（シナリオ上の到達目安）**")
+            rows = []
+            for lab, key, up in [("利確1", "tp1", True), ("利確2", "tp2", True),
+                                 ("利確3", "tp3", True), ("損切り", "stop", False)]:
+                lvl = lv.get(key)
+                p = scen_mod.prob_reach(price, lvl, vol, days, ascore["tilt"], up=up)
+                rows.append({"ライン": lab, "価格": f"${lvl}",
+                             ("上昇到達目安" if up else "下落到達リスク"): f"{p}%" if p is not None else "—"})
+            st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        except Exception:
+            pass
+
+    st.caption("⚠️ これは断定ではなく、現在のボラティリティ・テクニカル・ニュース影響から作る概算シナリオです。"
+               "到達確率はタッチ確率ではなく終端確率ベースの簡易推定です。"
                "投資助言ではありません。発注前にMoomooで最新値を確認してください。")
 
 
@@ -345,7 +399,7 @@ def render_stock(rmap, watch=None, positions=None):
     else:
         st.line_chart(r["df"]["Close"]); st.caption("（plotly未導入のため簡易表示）")
 
-    _render_scenario_forecast(r, sel, f, psrc)
+    _render_scenario_forecast(r, sel, f, psrc, positions)
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
