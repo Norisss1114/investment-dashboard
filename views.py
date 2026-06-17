@@ -13,6 +13,7 @@ from modules import news as news_mod
 from modules import holding_monitor as hm_mod
 from modules import data_fetch as data_fetch_mod
 from modules import goal_plan as gp_mod
+from modules import scenario as scen_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -236,6 +237,47 @@ def render_ranking(results, regime, positions=None, rmap=None):
     st.caption("※スコア・アクションは公開情報に基づく機械的な目安で、投資助言ではありません。")
 
 
+# ============================================================ v17: 未来シナリオ予測
+_SCEN_META = {"bull": ("強気", "#16a34a"), "neutral": ("中立", "#9ca3af"), "bear": ("弱気", "#dc2626")}
+
+
+def _render_scenario_forecast(r, ticker, f, psrc):
+    """個別銘柄分析の既存チャート下に『未来シナリオ予測』を追加（v17）。"""
+    st.markdown("#### 🔮 未来シナリオ予測")
+    price = f.get("price")
+    # 現在値が取れない/仮値のときは予測しない
+    if not price or price <= 0 or psrc in ("unavailable", "fallback_avg_cost"):
+        st.warning("現在値が取得できない/仮値のため予測しません。")
+        return
+
+    days = st.selectbox("予測期間", [20, 40, 60], index=0,
+                        format_func=lambda d: f"{d}営業日", key=f"scen_days_{ticker}")
+    net_impact = (r.get("news_sum") or {}).get("avg_impact", 0) or 0
+    scen = scen_mod.compute_scenarios(price, r.get("df"), r.get("snap") or {}, net_impact, days)
+
+    if psrc == "mock" or f.get("is_sample"):
+        st.caption("※サンプルデータによる参考シナリオです。")
+    if scen.get("data_insufficient"):
+        st.caption("※価格データが不足しているため、中立寄り・概算レンジで表示しています。")
+
+    fig = scen_mod.build_scenario_chart(r.get("df"), ticker, scen, days)
+    if fig is not None:
+        st.plotly_chart(fig, width='stretch')
+
+    # 説明カード
+    for key in ("bull", "neutral", "bear"):
+        s = scen[key]; _, color = _SCEN_META[key]
+        lo, hi = s["range"]
+        st.markdown(
+            f'<div style="border-left:4px solid {color};padding:4px 0 4px 10px;margin-bottom:4px;">'
+            f'<b style="color:{color};">{s["label"]} {s["prob"]}%</b>'
+            f'　想定レンジ ${lo}〜${hi}<br>'
+            f'<span style="font-size:0.82rem;color:#8a8a8e;">理由：{s["desc"]}</span></div>',
+            unsafe_allow_html=True)
+    st.caption("⚠️ これは現在のテクニカル・ニュースから作るシナリオ分岐であり、将来を保証するものではありません。"
+               "投資助言ではありません。発注前にMoomooで最新値を確認してください。")
+
+
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):
     st.header("🔎 個別銘柄分析")
@@ -277,6 +319,8 @@ def render_stock(rmap, watch=None, positions=None):
         st.plotly_chart(fig, width='stretch')
     else:
         st.line_chart(r["df"]["Close"]); st.caption("（plotly未導入のため簡易表示）")
+
+    _render_scenario_forecast(r, sel, f, psrc)
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
