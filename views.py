@@ -1100,14 +1100,7 @@ def _render_discovery_result(disc, regime):
         picks = st.multiselect("追加する銘柄を選択", [it["ticker"] for it in top20])
         if st.button("選択した銘柄をウォッチリストに追加", width='stretch'):
             if picks:
-                cur = [t.strip().upper() for t in st.session_state.get("watchlist_text", "").replace("\n", ",").split(",") if t.strip()]
-                merged = list(dict.fromkeys(cur + picks))
-                ok = storage_mod.save_settings(merged, st.session_state.get("capital", 10000.0),
-                                               st.session_state.get("risk_pct", 2.0),
-                                               st.session_state.get("max_pos_pct", 20.0))
-                st.session_state["_pending_watchlist"] = merged
-                st.session_state["_added_msg"] = ("ok" if ok else "warn", picks)
-                st.rerun()
+                wl_add(picks)  # v15.3: 追加は共通の set_watchlist 経由に統一
             else:
                 st.info("銘柄を選択してください。")
 
@@ -2110,36 +2103,56 @@ from modules import search as search_mod
 from modules import engine as engine_wl
 
 
+# v15.3: ウォッチリストの永続化を一元化。
+#   唯一の正  = settings.json（init_state で st.session_state["watchlist"] にロード）
+#   session  = 表示・一時状態のみ（保存元にはしない）
+#   追加/削除/手動編集/検索/発掘/おすすめ/個別分析 すべて set_watchlist 経由で保存。
+def clean_tickers(items):
+    """大文字化・重複統合・空文字除去した銘柄リストを返す。"""
+    out = []
+    for t in (items or []):
+        u = str(t).strip().upper()
+        if u and u not in out:
+            out.append(u)
+    return out
+
+
 def wl_current():
-    return [t.strip().upper() for t in st.session_state.get("watchlist_text", "").replace("\n", ",").split(",") if t.strip()]
+    """ウォッチリストの唯一の正（settings.json 由来の session_state['watchlist']）。"""
+    return list(st.session_state.get("watchlist", []))
 
 
-def _wl_save(merged, msg=None):
-    st.session_state["_pending_watchlist"] = merged
+def set_watchlist(tickers, msg=None, rerun=True):
+    """ウォッチリスト更新の唯一の入口。session_state と settings.json を同時に更新する。"""
+    merged = clean_tickers(tickers)
+    st.session_state["watchlist"] = merged
     storage_mod.save_settings(merged, st.session_state.get("capital", 10000.0),
-                              st.session_state.get("risk_pct", 2.0), st.session_state.get("max_pos_pct", 20.0))
+                              st.session_state.get("risk_pct", 2.0),
+                              st.session_state.get("max_pos_pct", 20.0))
     if msg:
         st.session_state["_added_msg"] = msg
-    st.rerun()
+    if rerun:
+        st.rerun()
 
 
 def wl_add(tickers, label=None):
     cur = wl_current()
-    add = [t.upper() for t in (tickers if isinstance(tickers, (list, tuple)) else [tickers])]
-    merged = list(dict.fromkeys(cur + add))
+    add = tickers if isinstance(tickers, (list, tuple)) else [tickers]
+    merged = clean_tickers(cur + list(add))
     if merged != cur:
-        _wl_save(merged, ("ok", add))
+        set_watchlist(merged, ("ok", clean_tickers(add)))
 
 
 def wl_remove(ticker):
     cur = wl_current()
-    merged = [t for t in cur if t != ticker.upper()]
+    u = str(ticker).strip().upper()
+    merged = [t for t in cur if t != u]
     if merged != cur:
-        _wl_save(merged)
+        set_watchlist(merged)
 
 
 def wl_has(ticker):
-    return ticker.upper() in wl_current()
+    return str(ticker).strip().upper() in wl_current()
 
 
 def render_suggested(key_prefix="sug", title="💡 おすすめ監視銘柄"):
@@ -2215,8 +2228,18 @@ def render_sidebar_watchlist(positions, regime):
         st.caption("まだ買い候補がありません。検索かおすすめから追加できます。")
 
     with st.expander("✏️ 手動編集（カンマ区切り）", expanded=False):
-        st.text_area("ティッカー（カンマ区切り）", key="watchlist_text", height=80,
-                     help="上級者向け。カンマ/改行区切りで直接編集できます。")
+        # v15.3: 保存元(settings.json)は『更新』押下時のみ書き換える。
+        # キーを現在のウォッチ内容に紐付け、常に最新を表示しつつ編集中の値は保持。
+        seed = ", ".join(cur)
+        edited = st.text_area("ティッカー（カンマ区切り）", value=seed, key=f"wl_edit_{seed}",
+                              height=80, help="上級者向け。カンマ/改行区切りで直接編集→『この内容で更新』。")
+        if st.button("この内容で更新", key="wl_manual_apply", width='stretch'):
+            parsed = clean_tickers((edited or "").replace("\n", ",").split(","))
+            if not parsed:
+                # 要件4: 空のときは既存ウォッチを上書きしない
+                st.info("空のため、既存のウォッチリストを保持しました（削除は × ボタンから）。")
+            else:
+                set_watchlist(parsed)
 
     st.divider()
     with st.expander("💡 おすすめ監視銘柄", expanded=not cur):

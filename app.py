@@ -32,11 +32,14 @@ def run_analysis_map(tickers_tuple, market_score, market_mode, fomc_days):
 def init_state():
     if "loaded" not in st.session_state:
         s = storage.load_settings()
-        st.session_state.watchlist_text = ", ".join(s["watchlist"])
+        # v15.3: ウォッチリストの唯一の正は settings.json。session_state["watchlist"]（リスト）に保持。
+        st.session_state["watchlist"] = views.clean_tickers(s["watchlist"])
         st.session_state.capital = float(s["capital"])
         st.session_state.risk_pct = float(s["risk_pct"])
         st.session_state.max_pos_pct = float(s["max_pos_pct"])
         st.session_state.loaded = True
+    if "watchlist" not in st.session_state:  # 安全策（settings.json欠損/破損時も空リストで継続）
+        st.session_state["watchlist"] = []
     if "page" not in st.session_state:
         st.session_state["page"] = "🏠 ホーム"
 
@@ -123,9 +126,8 @@ def main():
     }
     </style>
     """, unsafe_allow_html=True)
-    # 発掘ページからのウォッチリスト追加を、ウィジェット生成前に反映
-    if "_pending_watchlist" in st.session_state:
-        st.session_state.watchlist_text = ", ".join(st.session_state.pop("_pending_watchlist"))
+    # v15.3: ウォッチ更新は views.set_watchlist が session_state["watchlist"] と settings.json を
+    # 直接更新するため、ここでは追加結果のメッセージのみ表示する。
     if "_added_msg" in st.session_state:
         kind, picks = st.session_state.pop("_added_msg")
         (st.success if kind == "ok" else st.warning)(
@@ -164,8 +166,8 @@ def main():
         macro_data_for_wl = macro.get_market_indices()
         regime_for_wl = macro.assess_regime(macro_data_for_wl)
         views.render_sidebar_watchlist(positions, regime_for_wl)
-        raw = st.session_state.get("watchlist_text", "")
-        watch = [t.strip().upper() for t in raw.replace("\n", ",").split(",") if t.strip()]
+        # v15.3: 分析対象は唯一の正である session_state["watchlist"] から取得
+        watch = views.wl_current()
 
         st.subheader("資金設定")
         st.number_input("総資金 ($)", min_value=0.0, step=500.0, key="capital")
