@@ -240,6 +240,8 @@ def main():
         views.render_positions(rmap, positions, regime, cap)
     elif page == "🗓 保有ニュース監視":
         views.render_holding_monitor(rmap, positions, regime)
+    elif page == "🎯 目標達成プラン":
+        views.render_goal_plan(rmap, positions, regime, cap)
     elif page == "📷 Moomoo同期":
         views.render_moomoo_sync()
     elif page == "ポートフォリオリスク":

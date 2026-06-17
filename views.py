@@ -12,6 +12,7 @@ from modules import ui_helpers as ui
 from modules import news as news_mod
 from modules import holding_monitor as hm_mod
 from modules import data_fetch as data_fetch_mod
+from modules import goal_plan as gp_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -642,12 +643,24 @@ def render_alerts(results_by_ticker, positions, regime):
 
 
 # ---------------------------------------------------------------- 発注メモ
+def _render_goal_orders():
+    """v16: 目標達成プランで保存した買い候補（保有/ウォッチが無くても表示）。"""
+    orders = (gp_mod.load_goal() or {}).get("orders") or []
+    if orders:
+        st.subheader("🎯 目標達成プランの買い候補（保存済み）")
+        st.caption("『🎯 目標達成プラン』で保存したバランス案の買い候補・株数・損切り・利確です。最終発注はMoomooで確認。")
+        lines = [f"{o['ticker']}（{o['role']}）: {o['shares']}株 @ ${o['entry']} / "
+                 f"損切り ${o['stop']} / 利確1 ${o['tp1']} / 利確2 ${o['tp2']}" for o in orders]
+        st.code("\n".join(lines), language="text")
+
+
 def render_order_memo(results_by_ticker, positions, regime):
     st.header("📝 Moomoo 手動発注メモ")
     st.caption("コピーしてMoomooの発注時メモに。買い注文メモと、保有中の売り/管理メモを生成します。")
+    _render_goal_orders()  # 目標プラン由来の発注メモ（銘柄未登録でも表示）
     tickers = sorted(set(list(results_by_ticker.keys()) + [p["ticker"].upper() for p in positions]))
     if not tickers:
-        st.info("ウォッチリストか保有を登録してください。"); return
+        st.info("ウォッチリストか保有を登録すると、個別の買い/保有メモも表示します。"); return
     sel = st.selectbox("銘柄を選択", tickers)
     a = results_by_ticker.get(sel)
 
@@ -825,6 +838,167 @@ def render_holding_monitor(rmap, positions, regime):
 
     st.caption("※価格・影響予想は公開情報とテクニカルに基づく機械的な目安です。ニュース影響予想は外れることがあります。"
                "投資助言ではありません。最終発注は必ずMoomooでご自身が確認してください。")
+
+
+# ---------------------------------------------------------------- v16: 目標達成プラン
+_FEAS_COLOR = {"現実的": "#16a34a", "やや難しい": "#eab308", "かなり難しい": "#f97316", "非現実的": "#dc2626"}
+_ROLE_COLOR = {"主力": "#15803d", "成長枠": "#0ea5e9", "守り枠": "#64748b", "短期狙い": "#f59e0b", "見送り": "#dc2626"}
+
+
+def render_goal_plan(rmap, positions, regime, capital):
+    st.header("🎯 目標達成プラン")
+    st.caption("現在資産・目標金額・期限・毎月追加から必要利回りと現実性を計算し、"
+               "保有/ウォッチ/発掘/おすすめ銘柄で目標向けプランを提案します。"
+               "⚠️ 投資助言ではありません。無理な目標は正直に表示します。最終発注はMoomooで確認してください。")
+
+    saved = gp_mod.load_goal() or {}
+
+    # ---------- 入力（カード型） ----------
+    with st.container(border=True):
+        st.markdown("##### 📝 目標を入力")
+        c1 = st.columns(2)
+        current_assets = c1[0].number_input("現在資産 ($)", min_value=0.0, step=500.0,
+                                             value=float(saved.get("current_assets", capital or 2000.0)), key="gp_current")
+        goal_amount = c1[1].number_input("目標金額 ($)", min_value=0.0, step=500.0,
+                                         value=float(saved.get("goal_amount", 10000.0)), key="gp_goal")
+        c2 = st.columns(2)
+        hz_opts = list(gp_mod.HORIZONS.keys())
+        horizon = c2[0].selectbox("期限", hz_opts,
+                                  index=hz_opts.index(saved.get("horizon", "1年")) if saved.get("horizon") in hz_opts else 2,
+                                  key="gp_horizon")
+        monthly_add = c2[1].number_input("毎月追加資金 ($)", min_value=0.0, step=50.0,
+                                         value=float(saved.get("monthly_add", 0.0)), key="gp_monthly")
+        c3 = st.columns(3)
+        risk_tol = c3[0].selectbox("リスク許容度", gp_mod.RISK_TOLERANCES,
+                                   index=gp_mod.RISK_TOLERANCES.index(saved.get("risk_tolerance", "中"))
+                                   if saved.get("risk_tolerance") in gp_mod.RISK_TOLERANCES else 1, key="gp_risk")
+        ml_opts = [f"{x}%" for x in gp_mod.MAX_LOSS_CHOICES]
+        ml_default = f'{int(saved.get("max_loss_pct", 10))}%'
+        max_loss = c3[1].selectbox("最大許容損失", ml_opts,
+                                   index=ml_opts.index(ml_default) if ml_default in ml_opts else 1, key="gp_maxloss")
+        style = c3[2].selectbox("投資スタイル", gp_mod.STYLES,
+                                index=gp_mod.STYLES.index(saved.get("style", "バランス"))
+                                if saved.get("style") in gp_mod.STYLES else 1, key="gp_style")
+
+    inputs = {"current_assets": current_assets, "goal_amount": goal_amount, "horizon": horizon,
+              "monthly_add": monthly_add, "risk_tolerance": risk_tol,
+              "max_loss_pct": int(max_loss.rstrip("%")), "style": style}
+    comp = gp_mod.compute(inputs)
+
+    # ---------- 結論 ----------
+    fcol = _FEAS_COLOR.get(comp["feasibility"], "#64748b")
+    with st.container(border=True):
+        st.markdown("##### 🧭 結論")
+        chips = [
+            ("目標達成スコア", f'{comp["score"]}', "/100", fcol),
+            ("達成可能性", comp["feasibility"], "", fcol),
+            ("必要年率", f'{comp["req_annual"]}%', "", "#1d1d1f"),
+            ("必要月率", f'{comp["req_monthly"]}%', "", "#1d1d1f"),
+            ("不足額", f'${comp["shortfall"]:,.0f}', "", "#1d1d1f"),
+            ("必要運用益", f'${comp["need_gain"]:,.0f}', "積立後", "#1d1d1f"),
+        ]
+        html = '<div style="display:flex;flex-wrap:wrap;gap:8px;">'
+        for label, val, sub, color in chips:
+            html += (f'<div style="flex:1 1 100px;min-width:100px;background:#f7f7fa;border-radius:14px;padding:8px 11px;">'
+                     f'<div style="font-size:0.7rem;color:#8a8a8e;">{label}</div>'
+                     f'<div style="font-size:1.15rem;font-weight:800;color:{color};line-height:1.25;">{val}'
+                     f'<span style="font-size:0.66rem;color:#aaa;font-weight:600;"> {sub}</span></div></div>')
+        html += '</div>'
+        st.markdown(html, unsafe_allow_html=True)
+
+    # ---------- 現実性・正直な助言 ----------
+    with st.container(border=True):
+        st.markdown("##### ✅ 現実性")
+        lead = comp["advice"][0] if comp["advice"] else ""
+        if comp["feasibility"] in ("非現実的", "かなり難しい"):
+            st.warning("⚠️ " + lead)
+        else:
+            st.success("👍 " + lead)
+        for a in comp["advice"][1:]:
+            st.caption("・" + a)
+        st.caption(f"必要リスク水準: **{comp['risk_level']}**")
+
+    # ---------- 推奨戦略 ----------
+    with st.container(border=True):
+        st.markdown("##### 📐 推奨戦略")
+        m = st.columns(4)
+        m[0].metric("推奨現金比率", f'{comp["cash_pct"]}%')
+        m[1].metric("最大ポジション", f'{comp["max_pos_pct"]}%')
+        m[2].metric("銘柄数", f'{comp["n_positions"]}')
+        m[3].metric("分割購入", f'{comp["splits"]}回')
+        m2 = st.columns(2)
+        m2[0].metric("投資に回す額", f'${comp["invest_budget"]:,.0f}')
+        m2[1].metric("1銘柄あたり最大損失", f'${comp["per_stock_loss"]:,.0f}')
+        st.caption(f"利確ルール: {comp['tp_rule']}　/　損切りルール: {comp['stop_rule']}")
+
+    # ---------- 候補銘柄 ----------
+    candidates = gp_mod.build_candidates(rmap, positions, regime)
+    variants = gp_mod.portfolio_variants(candidates, comp)
+
+    # ---------- 3プラン ----------
+    st.markdown("##### 🗂 ポートフォリオ案（3パターン）")
+    if not candidates:
+        st.info("候補銘柄がありません。ウォッチ追加・Moomoo同期・銘柄発掘スキャンを行うと提案が出ます。")
+    else:
+        vt = st.tabs([f"🛡 {variants[0]['name']}", f"⚖️ {variants[1]['name']}", f"🔥 {variants[2]['name']}"])
+        for tab, v in zip(vt, variants):
+            with tab:
+                st.caption(v["note"])
+                vm = st.columns(4)
+                vm[0].metric("現金比率", f'{v["cash_pct"]}%')
+                vm[1].metric("投資額", f'${v["invested"]:,.0f}')
+                vm[2].metric("現金", f'${v["cash_amount"]:,.0f}')
+                vm[3].metric("最大損失", f'${v["max_loss"]:,.0f}', f'-{v["max_loss_pct"]}%')
+                if v["allocations"]:
+                    adf = pd.DataFrame([{
+                        "銘柄": a["ticker"], "役割": a["role"], "投入額": a["amount"], "株数": a["shares"],
+                        "エントリー": a["entry"], "損切り": a["stop"], "利確1": a["tp1"], "利確2": a["tp2"],
+                    } for a in v["allocations"]])
+                    st.dataframe(adf.style.format({"投入額": "${:,.0f}", "エントリー": "${:.2f}",
+                                                   "損切り": "${:.2f}", "利確1": "${:.2f}", "利確2": "${:.2f}"}),
+                                 width='stretch', hide_index=True)
+                else:
+                    st.caption("このプランに合う候補がありませんでした。")
+
+    # ---------- 銘柄候補（役割つき） ----------
+    if candidates:
+        st.markdown("##### 📋 銘柄候補（役割・推奨配分）")
+        rows, skipped = gp_mod.candidate_rows(candidates, comp)
+        for c in rows:
+            with st.container(border=True):
+                cc = st.columns([1.3, 1, 2.2])
+                cc[0].markdown(f'<b>{c["ticker"]}</b> <span style="color:#8a8a8e;font-size:0.78rem;">'
+                               f'${c["price"]}</span>', unsafe_allow_html=True)
+                cc[1].markdown(f'<span style="background:{_ROLE_COLOR.get(c["role"],"#64748b")};color:white;'
+                               f'border-radius:8px;padding:2px 8px;font-size:0.78rem;font-weight:700;">{c["role"]}</span>',
+                               unsafe_allow_html=True)
+                cc[2].markdown(f'<span style="font-size:0.82rem;">スコア {c["score"]:.0f}・投入 ${c["amount"]:,.0f}'
+                               f'（{c["shares"]}株）・貢献度 {c["contribution"]}%</span>', unsafe_allow_html=True)
+                detail = (f'エントリー ${c["entry"]}・損切り ${c["stop"]}・利確1 ${c["tp1"]}・利確2 ${c["tp2"]}')
+                st.caption(detail + (f'　⚠️ {c["note"]}' if c.get("note") else ""))
+        if skipped:
+            st.caption("見送り（スコア低/AVOID）: " + ", ".join(s["ticker"] for s in skipped[:12]))
+
+    # ---------- 注意点 ----------
+    with st.container(border=True):
+        st.markdown("##### ⚠️ 注意点")
+        st.markdown("- 必要リターンが高いほど**大きなリスク**を取ることになります。損切りを必ず守ってください。\n"
+                    "- 価格・スコア・配分は機械的な目安で、将来の成果を保証しません。\n"
+                    "- 1銘柄に集中せず、分割エントリー・分散を徹底してください。\n"
+                    "- 最終的な発注（株数・価格・注文種別）は必ずMoomooでご自身が確認してください。")
+
+    # ---------- 保存 ----------
+    if st.button("💾 この目標プランを保存", width='stretch', key="gp_save"):
+        payload = dict(inputs)
+        payload["summary"] = {
+            "goal_amount": comp["goal_amount"], "req_monthly": comp["req_monthly"],
+            "req_annual": comp["req_annual"], "feasibility": comp["feasibility"], "score": comp["score"],
+        }
+        payload["orders"] = gp_mod.orders_for_memo(variants, prefer="バランスプラン")
+        if gp_mod.save_goal(payload):
+            st.success("保存しました。ホームの『今日やること』と発注メモにも反映されます。")
+        else:
+            st.error("保存に失敗しました。")
 
 
 # ---------------------------------------------------------------- 売買履歴
@@ -1981,6 +2155,11 @@ def render_home(regime, events, positions, rmap):
     # ===== 1. 今日やること（最上部・最重要） =====
     st.markdown("### ✅ 今日やること")
     todos = []  # (color, html)
+    # v16: 目標達成プランの1行（保存済みの目標があれば）
+    _goal_line = gp_mod.home_line(gp_mod.load_goal())
+    if _goal_line:
+        _gc = "#dc2626" if "非現実的" in _goal_line else "#0ea5e9"
+        todos.append((_gc, _goal_line))
     # v15: 保有ニュース監視からの提案（利確/損切り価格つき・最大4件）
     for color, line in hm_mod.home_todos(monitors, limit=4):
         todos.append((color, line))
@@ -2259,11 +2438,13 @@ def watchlist_toggle_button(ticker, key_prefix="wl"):
 # ================================================================== v14.3: カード型ナビ
 NAV_GROUPS = [
     ("⭐ よく使う", True, [
-        ("🏠", "ホーム", "🏠 ホーム"), ("🔎", "銘柄発掘", "🔍 銘柄発掘"),
+        ("🏠", "ホーム", "🏠 ホーム"), ("🎯", "目標達成プラン", "🎯 目標達成プラン"),
+        ("🔎", "銘柄発掘", "🔍 銘柄発掘"),
         ("📋", "今日のアクション", "今日のアクション"), ("🗓", "保有ニュース監視", "🗓 保有ニュース監視"),
         ("📷", "Moomoo同期", "📷 Moomoo同期"), ("🔔", "通知設定", "🔔 通知設定"),
     ]),
     ("🎯 買う前", True, [
+        ("🎯", "目標達成プラン", "🎯 目標達成プラン"),
         ("📊", "市場環境", "市場環境"), ("🔍", "銘柄発掘", "🔍 銘柄発掘"),
         ("🔬", "個別銘柄分析", "個別銘柄分析"), ("🧠", "ニュース精密解析", "🧠 ニュース精密解析"),
         ("📰", "ニュース分析", "ニュース分析"), ("🧭", "売買プラン", "売買プラン"),
