@@ -260,20 +260,45 @@ def _render_scenario_forecast(r, ticker, f, psrc):
     if scen.get("data_insufficient"):
         st.caption("※価格データが不足しているため、中立寄り・概算レンジで表示しています。")
 
+    # E: シナリオ品質スコア（予測信頼度）
+    q = scen_mod.quality_score(r.get("df"), r.get("snap") or {}, r.get("news") or {})
+    st.markdown(f'**予測信頼度 {q["score"]} / 100**　'
+                f'<span style="font-size:0.8rem;color:#8a8a8e;">{" ・ ".join(q["reasons"])}</span>',
+                unsafe_allow_html=True)
+
     fig = scen_mod.build_scenario_chart(r.get("df"), ticker, scen, days)
     if fig is not None:
         st.plotly_chart(fig, width='stretch')
 
-    # 説明カード
+    # 説明カード（確率・想定レンジ・理由）
     for key in ("bull", "neutral", "bear"):
         s = scen[key]; _, color = _SCEN_META[key]
         lo, hi = s["range"]
         st.markdown(
             f'<div style="border-left:4px solid {color};padding:4px 0 4px 10px;margin-bottom:4px;">'
             f'<b style="color:{color};">{s["label"]} {s["prob"]}%</b>'
-            f'　想定レンジ ${lo}〜${hi}<br>'
+            f'　想定レンジ ${lo}〜${hi}（中央値 ${s["mid"]}）<br>'
             f'<span style="font-size:0.82rem;color:#8a8a8e;">理由：{s["desc"]}</span></div>',
             unsafe_allow_html=True)
+
+    # C: シナリオ根拠（使った指標）
+    with st.expander("📊 シナリオの根拠（使用した指標）", expanded=False):
+        for line in scen.get("factors", []):
+            st.markdown(f"- {line}")
+
+    # D: アナリスト目標株価との比較（target がある時だけ）
+    target = f.get("target")
+    if target and target > 0 and price > 0:
+        up_room = (target / price - 1) * 100
+        bear_lo = scen["bear"]["range"][0]
+        down_room = (bear_lo / price - 1) * 100
+        st.markdown("**🎯 目標株価との比較**")
+        tc = st.columns(4)
+        tc[0].metric("現在値", f"${price:,.2f}")
+        tc[1].metric("目標株価", f"${target:,.2f}")
+        tc[2].metric("上昇余地", f"{up_room:+.1f}%")
+        tc[3].metric("弱気下限まで", f"{down_room:+.1f}%")
+
     st.caption("⚠️ これは現在のテクニカル・ニュースから作るシナリオ分岐であり、将来を保証するものではありません。"
                "投資助言ではありません。発注前にMoomooで最新値を確認してください。")
 
