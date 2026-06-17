@@ -88,13 +88,18 @@ def build_digest(regime, events, positions, watchlist, analyze, top3_news=True):
         except Exception:
             rmap[t] = {"ticker": t, "ok": False}
     try:
-        from modules import portfolio as pf, holding_action as ha
+        from modules import portfolio as pf, holding_action as ha, holding_monitor as hm
         for t, pos in pos_by_t.items():
             ev = pf.evaluate_position(pf._normalize(pos), rmap.get(t))
             hd = ha.decide(ev, mode)
+            lv = hm.price_levels(ev)            # v15: 利確/損切りの自動提案
+            fc = hm.impact_forecast(ev)
             holdings.append({"ticker": t, "action": hd["action"], "reason": hd["reason"],
-                             "todo": ha.moomoo_todo(ev, hd), "stop": ev.get("init_stop"),
-                             "tp1": ev.get("init_tp1"), "pl_pct": ev.get("pl_pct")})
+                             "todo": ha.moomoo_todo(ev, hd),
+                             "stop": ev.get("init_stop") or lv["stop"],
+                             "tp1": ev.get("init_tp1") or lv["tp1"],
+                             "half": lv["half"], "exit_all": lv["exit_all"], "trail": lv["trail"],
+                             "short": fc["短期"], "pl_pct": ev.get("pl_pct")})
     except Exception:
         pass
 
@@ -169,6 +174,9 @@ def _render_text(d):
         for h in d["holdings"]:
             pl = f"（{h['pl_pct']:+.1f}%）" if h.get("pl_pct") is not None else ""
             L.append(f"・{h['ticker']}{pl}：{h['action']} — {h['todo']}")
+            if h.get("stop") is not None:
+                L.append(f"    損切り ${h.get('stop','—')} / 利確1 ${h.get('tp1','—')} / "
+                         f"半分 ${h.get('half','—')} / 撤退 ${h.get('exit_all','—')}（短期:{h.get('short','—')}）")
     else:
         L.append("（保有銘柄なし。Moomoo同期で登録できます）")
     L.append("")

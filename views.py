@@ -10,6 +10,7 @@ from modules import risk as risk_mod
 from modules import backtest as bt_mod
 from modules import ui_helpers as ui
 from modules import news as news_mod
+from modules import holding_monitor as hm_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -117,6 +118,18 @@ def render_ranking(results, regime, positions=None, rmap=None):
                 m[5].metric("決算リスク", erisk)
                 st.write(f'**テクニカル**: {tech}　|　**推奨アクション**: {hd["action"]}')
                 st.info("📱 Moomooで今日やること: " + todo)
+                # v15: 保有ニュース監視からの価格提案・影響予想・今日の対応
+                mo = hm_mod.monitor_position(pf_mod._normalize(pos), rmap.get(pos["ticker"].upper()), regime)
+                lv = mo["levels"]; fc = mo["forecast"]
+                st.markdown(f'🗓 **今日の対応**: {mo["today"]}　|　**影響予想** '
+                            f'短期:{fc["短期"]} / 中期:{fc["中期"]} / スイング:{fc["スイング"]}'
+                            f'　|　**ニュース重要度** {mo["news_importance"]}')
+                pcols = st.columns(4)
+                pcols[0].caption(f"損切り ${lv['stop']}")
+                pcols[1].caption(f"利確1 ${lv['tp1']}")
+                pcols[2].caption(f"半分売る ${lv['half']}")
+                pcols[3].caption(f"全部撤退 ${lv['exit_all']}")
+        st.caption("💡 詳しい価格の理由・今後のイベントは「🗓 保有ニュース監視」ページへ。")
         st.divider()
 
     valid = [r for r in results if r.get("ok")]
@@ -564,6 +577,152 @@ def render_order_memo(results_by_ticker, positions, regime):
         st.code(memo_mod.hold_memo(ev, hd, ts, todo), language="text")
     else:
         st.caption("この銘柄は保有登録がありません（保有中メモは台帳に登録すると表示）。")
+
+    # ===== v15: 保有ニュース監視からの自動注文メモ =====
+    if held:
+        m = hm_mod.monitor_position(pf_mod._normalize(held[0]), a, regime)
+        st.subheader("🗓 自動提案（Moomooで設定する注文）")
+        st.caption("保有ニュース監視（v15）が現在値・取得単価・テクニカルから算出した目安です。最終発注はMoomooで確認。")
+        st.code("\n".join(hm_mod.order_memo_lines(m)), language="text")
+
+
+# ---------------------------------------------------------------- v15: 保有ニュース監視
+@st.cache_data(ttl=1800, show_spinner=False)
+def _cached_events(ticker):
+    """Finnhubの決算/目標株価/アナリスト評価を取得（30分キャッシュ・未設定でも落ちない）。"""
+    return hm_mod.fetch_events(ticker)
+
+
+def _fc_color(label):
+    return {"ポジティブ": "#16a34a", "中立": "#64748b", "ネガティブ": "#dc2626"}.get(label, "#94a3b8")
+
+
+def _imp_color(level):
+    return {"高": "#dc2626", "中": "#f59e0b", "低": "#64748b"}.get(level, "#94a3b8")
+
+
+def render_holding_monitor(rmap, positions, regime):
+    st.header("🗓 保有ニュース監視")
+    st.caption("保有銘柄すべての『今後の重要ニュース・決算』と『利確・損切り価格』を毎日自動で提案します。"
+               "保有が増減すれば対象も自動で変わります。⚠️ 投資助言ではありません。最終発注は必ずMoomooで確認してください。")
+
+    if not positions:
+        st.info("保有銘柄が未登録です。『📷 Moomoo同期』で登録すると、自動で監視対象になります。")
+        return
+
+    monitors = hm_mod.monitor_all(positions, rmap, regime)
+    if not hm_mod.events_available():
+        st.warning("🔑 Finnhub APIキー未設定：ニュース/決算カレンダーは取得できません。"
+                   "テクニカルだけで利確/損切りを提案します（アプリは落ちません）。")
+
+    # ---------- サマリ表 ----------
+    rows = []
+    for m in monitors:
+        rows.append({
+            "ティッカー": m["ticker"], "銘柄名": m["name"], "株数": m["shares"],
+            "取得単価": m["avg_cost"], "現在値": m["current"], "含み損益%": m["pl_pct"],
+            "次回決算": m["earnings_date"] or "—",
+            "ニュース重要度": m["news_importance"],
+            "短期影響": m["forecast"]["短期"], "今日の対応": m["today"],
+        })
+    sdf = pd.DataFrame(rows)
+    st.dataframe(sdf.style.format({"取得単価": "${:.2f}", "現在値": "${:.2f}",
+                                   "含み損益%": "{:+.1f}%", "株数": "{:.4g}"}),
+                 width='stretch', hide_index=True)
+    st.divider()
+
+    # ---------- 銘柄ごとの詳細 ----------
+    for m in monitors:
+        lv = m["levels"]; fc = m["forecast"]
+        pl = m["pl_pct"]; pl_col = "#16a34a" if (pl or 0) >= 0 else "#dc2626"
+        with st.container(border=True):
+            st.markdown(f'### {m["ticker"]} <span style="font-size:0.9rem;color:#8a8a8e;">{m["name"]}</span>',
+                        unsafe_allow_html=True)
+            c = st.columns(6)
+            c[0].metric("株数", f'{(m["shares"] or 0):.4g}')
+            c[1].metric("取得単価", f'${m["avg_cost"]}')
+            c[2].metric("現在値", f'${m["current"]}')
+            c[3].metric("含み損益", f'{pl:+.1f}%' if pl is not None else "—")
+            c[4].metric("次回決算", m["earnings_date"] or "—")
+            c[5].metric("ニュース重要度", m["news_importance"])
+
+            # --- 株価影響予想 ---
+            st.markdown('**📈 株価影響予想**')
+            fcc = st.columns(3)
+            for col, (k, sub) in zip(fcc, [("短期", "今日〜3日"), ("中期", "1〜2週間"), ("スイング", "1〜3ヶ月")]):
+                v = fc[k]
+                col.markdown(f'<div style="background:#f7f7fa;border-radius:10px;padding:8px 10px;">'
+                             f'<div style="font-size:0.72rem;color:#8a8a8e;">{k}（{sub}）</div>'
+                             f'<div style="font-weight:800;color:{_fc_color(v)};">{v}</div></div>',
+                             unsafe_allow_html=True)
+
+            # --- Upcoming Events（Finnhub追加取得・このページのみ）---
+            with st.expander("🗓 今後のイベント / アナリスト / 目標株価", expanded=False):
+                fe = _cached_events(m["ticker"])
+                if not fe["available"]:
+                    st.caption("API未設定：イベントは取得できません（テクニカル提案のみ）。")
+                else:
+                    shown = False
+                    if fe.get("earnings_date"):
+                        ed = fe.get("earnings_days")
+                        st.write(f"- 📅 次回決算: **{fe['earnings_date']}**" + (f"（あと{ed}日）" if ed is not None else ""))
+                        shown = True
+                    pt = fe.get("price_target")
+                    if pt and pt.get("mean"):
+                        up = ((pt["mean"] / m["current"] - 1) * 100) if m["current"] else 0
+                        st.write(f"- 🎯 目標株価（平均）: **${pt['mean']}**（現在比 {up:+.0f}%）"
+                                 f" / 高 ${pt.get('high','—')}・低 ${pt.get('low','—')}")
+                        shown = True
+                    rc = fe.get("recommendation")
+                    if rc:
+                        st.write(f"- 🧮 アナリスト評価（{rc.get('period','')}）: "
+                                 f"強気買い {rc.get('strongBuy',0)}・買い {rc.get('buy',0)}・"
+                                 f"中立 {rc.get('hold',0)}・売り {rc.get('sell',0)}・強気売り {rc.get('strongSell',0)}")
+                        shown = True
+                    if not shown:
+                        st.caption(fe.get("note") or "イベント未取得。")
+
+            # --- ニュース重要度 ---
+            st.markdown('**📰 直近の重要ニュース**')
+            if m["news_events"]:
+                for ne in m["news_events"][:5]:
+                    st.markdown(
+                        f'<div style="font-size:0.85rem;padding:2px 0;">'
+                        f'<span style="background:{_imp_color(ne["importance"])};color:white;border-radius:6px;'
+                        f'padding:1px 7px;font-size:0.72rem;">{ne["importance"]}</span> '
+                        f'<span style="color:#64748b;">[{ne["category"]}]</span> {ne["headline"][:60]}</div>',
+                        unsafe_allow_html=True)
+            elif not m["has_news"]:
+                st.caption("API未設定、またはニュース未取得。")
+            else:
+                st.caption("直近の重要ニュースはありません。")
+
+            # --- 利確・損切り自動提案 ---
+            st.markdown('**🎯 利確・損切りの自動提案（理由つき）**')
+            gc = st.columns(2)
+            with gc[0]:
+                st.markdown('🛡 **守り（損失を限定）**')
+                for lab, key in [("推奨損切り", "stop"), ("逆指値（利益確保）", "stop_limit"),
+                                 ("トレーリングストップ", "trail"), ("全部撤退", "exit_all")]:
+                    st.markdown(f'<div style="font-size:0.86rem;padding:2px 0;">'
+                                f'<b>{lab}: ${lv[key]}</b><br>'
+                                f'<span style="color:#8a8a8e;font-size:0.8rem;">理由: {lv[key+"_reason"]}</span></div>',
+                                unsafe_allow_html=True)
+            with gc[1]:
+                st.markdown('💰 **攻め（利益を伸ばす）**')
+                for lab, key in [("利確1", "tp1"), ("利確2", "tp2"), ("利確3", "tp3"), ("半分売る価格", "half")]:
+                    st.markdown(f'<div style="font-size:0.86rem;padding:2px 0;">'
+                                f'<b>{lab}: ${lv[key]}</b><br>'
+                                f'<span style="color:#8a8a8e;font-size:0.8rem;">理由: {lv[key+"_reason"]}</span></div>',
+                                unsafe_allow_html=True)
+
+            # --- 今日の対応 ---
+            st.markdown(f'<div style="margin-top:6px;padding:8px 12px;border-radius:10px;'
+                        f'background:{m["today_color"]}15;border-left:4px solid {m["today_color"]};">'
+                        f'<b>今日の対応:</b> {m["today"]}</div>', unsafe_allow_html=True)
+
+    st.caption("※価格・影響予想は公開情報とテクニカルに基づく機械的な目安です。ニュース影響予想は外れることがあります。"
+               "投資助言ではありません。最終発注は必ずMoomooでご自身が確認してください。")
 
 
 # ---------------------------------------------------------------- 売買履歴
@@ -1718,7 +1877,7 @@ def render_home(regime, events, positions, rmap):
 
     # ===== データ準備 =====
     holds = _hold_overview(positions, rmap, regime) if positions else []
-    attn = [h for h in holds if h["attention"]]
+    monitors = hm_mod.monitor_all(positions, rmap, regime) if positions else []  # v15: 保有ニュース監視
     week = events[0] if isinstance(events, tuple) else (events or [])
     week = [e for e in week if 0 <= e.get("days", 99) <= 7]
     cache = disc_home.load_cache()
@@ -1727,8 +1886,9 @@ def render_home(regime, events, positions, rmap):
     # ===== 1. 今日やること（最上部・最重要） =====
     st.markdown("### ✅ 今日やること")
     todos = []  # (color, html)
-    for h in (attn or holds)[:3]:
-        todos.append((h["color"], f'<b>{h["ticker"]}</b>：{h["label"]}。{h["todo"]}'))
+    # v15: 保有ニュース監視からの提案（利確/損切り価格つき・最大4件）
+    for color, line in hm_mod.home_todos(monitors, limit=4):
+        todos.append((color, line))
     if top3 and top3[0].get("verdict") in ("強いBUY", "BUY"):
         t0 = top3[0]
         todos.append(("#16a34a", f'<b>新規買い</b>：{t0["ticker"]} を ${t0.get("entry")} で指値（損切り ${t0.get("stop")}）'))
@@ -1975,8 +2135,8 @@ def watchlist_toggle_button(ticker, key_prefix="wl"):
 NAV_GROUPS = [
     ("⭐ よく使う", True, [
         ("🏠", "ホーム", "🏠 ホーム"), ("🔎", "銘柄発掘", "🔍 銘柄発掘"),
-        ("📋", "今日のアクション", "今日のアクション"), ("📷", "Moomoo同期", "📷 Moomoo同期"),
-        ("🔔", "通知設定", "🔔 通知設定"),
+        ("📋", "今日のアクション", "今日のアクション"), ("🗓", "保有ニュース監視", "🗓 保有ニュース監視"),
+        ("📷", "Moomoo同期", "📷 Moomoo同期"), ("🔔", "通知設定", "🔔 通知設定"),
     ]),
     ("🎯 買う前", True, [
         ("📊", "市場環境", "市場環境"), ("🔍", "銘柄発掘", "🔍 銘柄発掘"),
@@ -1984,7 +2144,8 @@ NAV_GROUPS = [
         ("📰", "ニュース分析", "ニュース分析"), ("🧭", "売買プラン", "売買プラン"),
     ]),
     ("💼 保有後", True, [
-        ("📋", "今日のアクション", "今日のアクション"), ("📒", "ポジション台帳", "ポジション台帳"),
+        ("📋", "今日のアクション", "今日のアクション"), ("🗓", "保有ニュース監視", "🗓 保有ニュース監視"),
+        ("📒", "ポジション台帳", "ポジション台帳"),
         ("📷", "Moomoo同期", "📷 Moomoo同期"), ("🛡️", "ポートフォリオリスク", "ポートフォリオリスク"),
         ("🔔", "アラート", "アラート"), ("📝", "発注メモ", "発注メモ"),
         ("🗂️", "売買履歴", "売買履歴"), ("🪞", "反省AI", "反省AI"),
