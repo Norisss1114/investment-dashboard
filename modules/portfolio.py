@@ -48,14 +48,44 @@ def _normalize(p: dict) -> dict:
 
 
 def evaluate_position(pos: dict, analysis: dict) -> dict:
-    """保有1件を評価。analysis は engine.analyze_ticker の結果（無ければ None 可）。"""
+    """保有1件を評価。analysis は engine.analyze_ticker の結果（無ければ None 可）。
+    v15.2: 現在値は get_quote の多段フォールバックで解決し、取得できなければ
+    取得単価を仮値として使う（price_is_fallback=True で明示）。"""
     cur = None
     snap = {}
     earnings_days = None
+    price_source = None
+    price_error = None
     if analysis and analysis.get("ok"):
         cur = analysis["fund"].get("price")
         snap = analysis.get("snap", {})
         earnings_days = analysis["plan"].get("earnings_days")
+        price_source = analysis.get("price_source")
+        price_error = analysis.get("price_error")
+    elif analysis:  # ok=False でも現在値だけは拾えることがある
+        cur = (analysis.get("fund") or {}).get("price")
+        price_source = analysis.get("price_source")
+        price_error = analysis.get("price_error")
+
+    # 現在値が無ければ、保有銘柄でも確実に最新値を引きにいく（Cloud対策）
+    if not cur or safe_float(cur, 0) <= 0:
+        from modules import data_fetch
+        try:
+            q = data_fetch.get_quote(pos["ticker"])
+        except Exception as e:
+            q = {"price": None, "source": "unavailable", "error": str(e)}
+        if q.get("price"):
+            cur = q["price"]; price_source = q["source"]; price_error = q.get("error")
+        else:
+            price_error = q.get("error") or price_error
+            price_source = price_source if price_source not in (None, "mock", "unavailable") else "unavailable"
+
+    # それでも無ければ取得単価を仮値（誤表示しないようフラグを立てる）
+    price_is_fallback = False
+    if not cur or safe_float(cur, 0) <= 0:
+        cur = pos["avg_cost"]
+        price_source = "fallback_avg_cost"
+        price_is_fallback = True
     cur = safe_float(cur, pos["avg_cost"])
 
     shares = pos["shares"]
@@ -84,6 +114,9 @@ def evaluate_position(pos: dict, analysis: dict) -> dict:
         "has_stop": pos["init_stop"] > 0,
         "snap": snap,
         "analysis": analysis,
+        "price_source": price_source,
+        "price_error": price_error,
+        "price_is_fallback": price_is_fallback,
     }
 
 

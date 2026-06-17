@@ -24,6 +24,15 @@ def analyze_ticker(ticker, market_score, market_mode="中立", fomc_days=None,
         if snap.get("price"):
             fund["price"] = snap["price"]
 
+        # v15.2: 現在値は多段フォールバックの get_quote を最優先（Cloudでyfinanceが不安定でもFinnhub等で補完）
+        q = data_fetch.get_quote(ticker, use_cache=use_cache)
+        if q.get("price"):
+            fund["price"] = q["price"]
+            price_source = q["source"]
+        else:
+            price_source = "mock" if (src == "mock" or fund.get("is_sample")) else q["source"]
+        price_error = q.get("error")
+
         if with_news:
             news_res = news_mod.get_news(ticker, use_cache=use_cache)
             news_sum = news_mod.summarize(news_res["items"])
@@ -42,9 +51,17 @@ def analyze_ticker(ticker, market_score, market_mode="中立", fomc_days=None,
         return {"ticker": ticker, "ok": True, "source": src, "df": df, "snap": snap,
                 "fund": fund, "news": news_res, "news_sum": news_sum,
                 "scores": scores, "plan": plan, "action": act, "avoid_reasons": avoid,
-                "with_news": with_news}
+                "with_news": with_news,
+                "price_source": price_source, "price_error": price_error}
     except Exception as e:
-        return {"ticker": ticker, "ok": False, "error": str(e)}
+        # v15.2: 分析全体が失敗しても、現在値だけは別ソースで拾えるようにする
+        try:
+            q = data_fetch.get_quote(ticker, use_cache=use_cache)
+        except Exception:
+            q = {"price": None, "source": "unavailable", "error": str(e)}
+        return {"ticker": ticker, "ok": False, "error": str(e),
+                "price_source": q.get("source"), "price_error": q.get("error"),
+                "fund": {"ticker": ticker, "price": q.get("price")}}
 
 
 def attach_news(result, market_score, market_mode="中立", use_cache=True) -> dict:

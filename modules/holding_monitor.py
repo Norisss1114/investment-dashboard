@@ -265,6 +265,10 @@ def monitor_position(pos, analysis, regime):
         "news_importance": news_importance(news_events),
         "has_news": has_news,
         "today": today, "today_color": today_color,
+        # v15.2: 価格ソース（誤表示防止）
+        "price_source": ev.get("price_source"),
+        "price_error": ev.get("price_error"),
+        "price_is_fallback": ev.get("price_is_fallback", False),
     }
 
 

@@ -200,7 +200,10 @@ def main():
     watch_results = [rmap[t] for t in watch if t in rmap]
     failed = [t for t in all_tickers if t in rmap and not rmap[t].get("ok")]
     if failed:
-        st.warning(f"取得に失敗（スキップ）: {', '.join(failed)}")
+        detail = "; ".join(
+            f"{t}（{rmap[t].get('error') or rmap[t].get('price_error') or '不明'}）" for t in failed)
+        st.warning(f"⚠️ 一部銘柄で分析に失敗: {detail}。"
+                   "保有銘柄の現在値は別ソース（Finnhub/Stooq）で補完を試みます。")
 
     cap = st.session_state.capital
     risk_pct = st.session_state.risk_pct

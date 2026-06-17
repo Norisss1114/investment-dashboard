@@ -11,6 +11,7 @@ from modules import backtest as bt_mod
 from modules import ui_helpers as ui
 from modules import news as news_mod
 from modules import holding_monitor as hm_mod
+from modules import data_fetch as data_fetch_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -258,6 +259,14 @@ def render_stock(rmap, watch=None, positions=None):
     up = (f.get("target", f["price"]) / f["price"] - 1) * 100 if f.get("price") else 0
     top[2].metric("上値余地", f"{up:+.1f}%")
     top[3].metric("決算日", f.get("earnings", "未定"))
+
+    # v15.2: 価格ソースの明示
+    psrc = r.get("price_source")
+    st.caption("価格ソース：" + data_fetch_mod.price_source_label(psrc or "—"))
+    if psrc == "unavailable" or not f.get("price"):
+        st.warning("⚠️ 現在値を取得できませんでした（yfinance / Finnhub / Stooq すべて失敗）。"
+                   + (f"詳細: {r.get('price_error')}" if r.get("price_error") else "")
+                   + " 表示中の数値は参考値です。")
 
     if r.get("source") == "mock" or f.get("is_sample"):
         st.caption("ℹ️ サンプル(モック)データ表示中。yfinance取得時は実データになります。")
@@ -693,12 +702,21 @@ def render_holding_monitor(rmap, positions, regime):
         st.warning("🔑 Finnhub APIキー未設定：ニュース/決算カレンダーは取得できません。"
                    "テクニカルだけで利確/損切りを提案します（アプリは落ちません）。")
 
+    # v15.2: 現在値が取得単価の仮表示になっている銘柄を明示（誤表示防止）
+    fb = [m["ticker"] for m in monitors if m.get("price_is_fallback")]
+    if fb:
+        st.warning("⚠️ 次の銘柄は現在値を取得できなかったため、**取得単価を仮表示**しています"
+                   "（本物の現在値ではありません）: " + ", ".join(fb)
+                   + "。Finnhub APIキー設定で安定します。")
+
     # ---------- サマリ表 ----------
     rows = []
     for m in monitors:
         rows.append({
             "ティッカー": m["ticker"], "銘柄名": m["name"], "株数": m["shares"],
-            "取得単価": m["avg_cost"], "現在値": m["current"], "含み損益%": m["pl_pct"],
+            "取得単価": m["avg_cost"],
+            "現在値": m["current"], "価格ソース": data_fetch_mod.price_source_label(m.get("price_source") or "—"),
+            "含み損益%": m["pl_pct"],
             "次回決算": m["earnings_date"] or "—",
             "ニュース重要度": m["news_importance"],
             "短期影響": m["forecast"]["短期"], "今日の対応": m["today"],
@@ -723,6 +741,12 @@ def render_holding_monitor(rmap, positions, regime):
             c[3].metric("含み損益", f'{pl:+.1f}%' if pl is not None else "—")
             c[4].metric("次回決算", m["earnings_date"] or "—")
             c[5].metric("ニュース重要度", m["news_importance"])
+
+            # v15.2: 価格ソースの明示／仮値の警告
+            st.caption("価格ソース：" + data_fetch_mod.price_source_label(m.get("price_source") or "—"))
+            if m.get("price_is_fallback"):
+                st.warning("⚠️ 現在値を取得できなかったため、取得単価を仮表示しています"
+                           "（本物の現在値ではありません）。含み損益・利確/損切りも仮計算です。")
 
             # --- 株価影響予想 ---
             st.markdown('**📈 株価影響予想**')
