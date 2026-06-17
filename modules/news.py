@@ -207,7 +207,8 @@ def _classify_with_ai(ticker, items):
 
 def _call_ai(prompt):
     """config.AI_PROVIDER_ORDER の順に試す（v4はOpenAI優先）。"""
-    import config
+    # config はモジュール先頭で import 済み。関数内で再importすると config が
+    # ローカル変数化し UnboundLocalError を起こすため、ここでは import しない。
     order = getattr(config, "AI_PROVIDER_ORDER", ["openai", "anthropic"])
     for provider in order:
         raw = _call_openai(prompt) if provider == "openai" else _call_anthropic(prompt)
@@ -221,7 +222,7 @@ def _call_anthropic(prompt):
     if not key:
         return None
     try:
-        import anthropic, config
+        import anthropic  # config はモジュール先頭の import を使う（再importしない）
         msg = anthropic.Anthropic(api_key=key).messages.create(
             model=getattr(config, "ANTHROPIC_MODEL", "claude-sonnet-4-6"), max_tokens=1024,
             messages=[{"role": "user", "content": prompt}])
@@ -235,8 +236,7 @@ def _call_openai(prompt):
     if not key:
         return None
     try:
-        from openai import OpenAI
-        import config
+        from openai import OpenAI  # config はモジュール先頭の import を使う（再importしない）
         resp = OpenAI(api_key=key).chat.completions.create(
             model=getattr(config, "OPENAI_MODEL", "gpt-4o-mini"),
             messages=[{"role": "user", "content": prompt}], max_tokens=1024)
