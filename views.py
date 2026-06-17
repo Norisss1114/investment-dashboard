@@ -19,6 +19,64 @@ def _action_chip(act: dict) -> str:
             f'{act["emoji"]} {act["action"]}</span>')
 
 
+# ============================================================ v15.1: 分析対象（ウォッチ∪保有）
+def analysis_targets(rmap, watch=None, positions=None):
+    """ウォッチ∪保有を分析対象として整理する共通ヘルパー。
+    返り値 dict:
+      tickers : 重複統合済みの対象（ウォッチ→保有の順）
+      tag     : {ticker: '💼 保有' / '⭐ ウォッチ' / '💼⭐ 保有+ウォッチ'}
+      valid   : ok=True の結果リスト（順序維持）
+      failed  : [(ticker, 失敗理由), ...]
+      mocks   : モックにフォールバックした ticker
+      empty   : 対象が0件（保有もウォッチも無い）か"""
+    rmap = rmap or {}
+    watch = [str(t).upper() for t in (watch or [])]
+    pos = [p["ticker"].upper() for p in (positions or [])]
+    wset, pset = set(watch), set(pos)
+    tickers = list(dict.fromkeys(watch + pos))
+    tag = {}
+    for t in tickers:
+        if t in wset and t in pset:
+            tag[t] = "💼⭐ 保有+ウォッチ"
+        elif t in pset:
+            tag[t] = "💼 保有"
+        else:
+            tag[t] = "⭐ ウォッチ"
+    valid, failed, mocks = [], [], []
+    for t in tickers:
+        r = rmap.get(t)
+        if r and r.get("ok"):
+            valid.append(r)
+            if r.get("source") == "mock" or (r.get("fund") or {}).get("is_sample"):
+                mocks.append(t)
+        else:
+            failed.append((t, (r or {}).get("error") or "解析結果なし（rmap未登録・対象外）"))
+    return {"tickers": tickers, "tag": tag, "valid": valid,
+            "failed": failed, "mocks": mocks, "empty": not tickers}
+
+
+def analysis_gate(rmap, watch, positions):
+    """空/取得失敗の共通メッセージを表示し、続行可能なら targets を返す（不可なら None）。
+    要件: 完全に空→案内(8) / 一部失敗→理由表示(5) / 全滅→『有効なデータがありません』(7) /
+          1件でもokなら続行(6)。"""
+    t = analysis_targets(rmap, watch, positions)
+    if t["empty"]:
+        st.info("保有もウォッチも未登録です。📷 **Moomoo同期**で保有を登録するか、"
+                "🔎 **銘柄検索**でウォッチに追加してください。")
+        return None
+    if t["failed"]:
+        st.warning("⚠️ 次の銘柄はデータ取得に失敗しました（yfinanceの一時的なレート制限・"
+                   "シンボル相違などの可能性）：\n\n"
+                   + "\n\n".join(f"・{tk}（{t['tag'][tk]}）: {why}" for tk, why in t["failed"]))
+    if not t["valid"]:
+        st.error("有効なデータがありません（対象 " + ", ".join(t["tickers"]) +
+                 " のすべてで取得に失敗）。サイドバーの『🔄 データ再取得』を時間をおいてお試しください。")
+        return None
+    if t["mocks"]:
+        st.caption("ℹ️ サンプル(モック)データ表示中: " + ", ".join(t["mocks"]) + "（実データ取得に失敗した銘柄）")
+    return t
+
+
 # ============================================================ 市場環境
 def render_market(macro_data, regime, events):
     st.header("🌍 市場環境")
@@ -177,12 +235,15 @@ def render_ranking(results, regime, positions=None, rmap=None):
 
 
 # ============================================================ 個別銘柄分析
-def render_stock(results):
+def render_stock(rmap, watch=None, positions=None):
     st.header("🔎 個別銘柄分析")
-    valid = [r for r in results if r.get("ok")]
-    if not valid:
-        st.warning("有効なデータがありません。"); return
-    sel = st.selectbox("銘柄を選択", [r["ticker"] for r in valid])
+    # v15.1: ウォッチ∪保有を対象に。失敗理由・空案内は共通ゲートで一元化
+    t = analysis_gate(rmap, watch, positions)
+    if t is None:
+        return
+    valid, tag = t["valid"], t["tag"]
+    sel = st.selectbox("銘柄を選択", [r["ticker"] for r in valid],
+                       format_func=lambda tk: f"{tk}　{tag.get(tk, '')}")
     r = next(x for x in valid if x["ticker"] == sel)
     f, s, snap, p, a = r["fund"], r["scores"], r["snap"], r["plan"], r["action"]
 
@@ -232,7 +293,7 @@ def render_stock(results):
 
 
 # ============================================================ ニュース分析
-def render_news(results):
+def render_news(rmap, watch=None, positions=None):
     st.header("📰 ニュース分析（実戦向け分類）")
     status = news_mod.news_status()
     if status["fully_ready"]:
@@ -244,10 +305,13 @@ def render_news(results):
                    + "＋" + ("AI分類" if status["ai_ready"] else "簡易キーワード分類")
                    + "で代替中。`.env`にキーを設定すると精度とスコアの信頼性が上がります。")
 
-    valid = [r for r in results if r.get("ok")]
-    if not valid:
-        st.warning("有効なデータがありません。"); return
-    sel = st.selectbox("銘柄を選択", [r["ticker"] for r in valid])
+    # v15.1: ウォッチ∪保有を対象に
+    t = analysis_gate(rmap, watch, positions)
+    if t is None:
+        return
+    valid, tag = t["valid"], t["tag"]
+    sel = st.selectbox("銘柄を選択", [r["ticker"] for r in valid],
+                       format_func=lambda tk: f"{tk}　{tag.get(tk, '')}")
     r = next(x for x in valid if x["ticker"] == sel)
     news, summ = r["news"], r["news_sum"]
 
@@ -281,15 +345,19 @@ def render_news(results):
 
 
 # ============================================================ 売買プラン
-def render_plan(results):
+def render_plan(rmap, watch=None, positions=None):
     st.header("📋 売買プラン（3段エントリー）")
     st.error("⛔ 損切り(逆指値)なしの買いは禁止。利確1で半分売り、残りを伸ばすのが基本です。")
-    valid = [r for r in results if r.get("ok")]
+    # v15.1: ウォッチ∪保有を対象に
+    t = analysis_gate(rmap, watch, positions)
+    if t is None:
+        return
+    valid, tag = t["valid"], t["tag"]
     for r in valid:
         f, p, s, a = r["fund"], r["plan"], r["scores"], r["action"]
         if "error" in p:
             continue
-        header = f'{r["ticker"]} — {a["emoji"]}{a["action"]}・{s["verdict"]}・{s["total"]}点'
+        header = f'{r["ticker"]} {tag.get(r["ticker"], "")} — {a["emoji"]}{a["action"]}・{s["verdict"]}・{s["total"]}点'
         with st.expander(header, expanded=False):
             st.info("📌 " + a["today"])
             st.markdown("**エントリー（3分割）**")
@@ -319,7 +387,7 @@ def render_plan(results):
 
 
 # ============================================================ リスク管理
-def render_risk(results, regime, capital, risk_pct, max_pos):
+def render_risk(rmap, watch, positions, regime, capital, risk_pct, max_pos):
     st.header("🛡️ リスク管理（資金配分）")
     st.caption("総資金から、ルールに沿った現金比率・株数・損益を計算します。")
 
@@ -332,7 +400,11 @@ def render_risk(results, regime, capital, risk_pct, max_pos):
     st.caption(f"相場モード「{regime['regime']}」では新規買い {regime['new_buy_pct']}% / 現金 {regime['cash_pct']}% が目安。"
                "損切りなしの買いは禁止、決算/FOMC前はサイズを落とす。")
 
-    valid = [r for r in results if r.get("ok")]
+    # v15.1: ウォッチ∪保有を対象に
+    t = analysis_gate(rmap, watch, positions)
+    if t is None:
+        return
+    valid, tag = t["valid"], t["tag"]
     rows, sized = [], []
     for r in valid:
         p = r["plan"]
@@ -341,7 +413,8 @@ def render_risk(results, regime, capital, risk_pct, max_pos):
         sz = risk_mod.position_sizing(capital, p["entry1"], p["stop"], p["tp1"], p["tp2"], risk_pct, max_pos)
         sized.append(sz)
         rows.append({
-            "ティッカー": r["ticker"], "アクション": r["action"]["action"],
+            "ティッカー": r["ticker"], "区分": tag.get(r["ticker"], ""),
+            "アクション": r["action"]["action"],
             "買える株数": sz.get("shares", 0),
             "1回目": sz.get("shares_1", 0), "2回目": sz.get("shares_2", 0), "3回目": sz.get("shares_3", 0),
             "投入額": sz.get("position_value", 0), "比率%": sz.get("position_pct", 0),
@@ -350,7 +423,7 @@ def render_risk(results, regime, capital, risk_pct, max_pos):
             "利確2 利益": sz.get("profit_tp2", 0) or 0,
         })
     if not rows:
-        st.warning("有効なデータがありません。"); return
+        st.warning("プラン計算可能なデータがありません（プランエラー）。"); return
 
     df = pd.DataFrame(rows)
     st.dataframe(
@@ -372,19 +445,24 @@ def render_risk(results, regime, capital, risk_pct, max_pos):
 
 
 # ============================================================ バックテスト
-def render_backtest(results):
+def render_backtest(rmap, watch=None, positions=None):
     st.header("🧪 簡易バックテスト")
     st.caption("過去約1年で『200日線より上＋RSI押し目→反発』で買い、損切り-8%/利確+20%/50日線割れで売った場合の概算。")
     st.info("ルール検証の目安です。手数料・スリッページ未考慮、過去成績は将来を保証しません。")
 
-    valid = [r for r in results if r.get("ok")]
+    # v15.1: ウォッチ∪保有を対象に
+    t = analysis_gate(rmap, watch, positions)
+    if t is None:
+        return
+    valid, tag = t["valid"], t["tag"]
     bts = bt_mod.backtest_watchlist(valid)
     rows = [b for b in bts if b.get("ok")]
     if not rows:
         st.warning("バックテスト可能なデータがありません（期間不足）。"); return
 
     df = pd.DataFrame([{
-        "ティッカー": b["ticker"], "取引回数": b["trades"], "勝率%": b["win_rate"],
+        "ティッカー": b["ticker"], "区分": tag.get(b["ticker"], ""),
+        "取引回数": b["trades"], "勝率%": b["win_rate"],
         "平均利益%": b["avg_win"], "平均損失%": b["avg_loss"], "最大DD%": b["max_dd"],
         "ルール戦略%": b["strategy_return"], "買い放置%": b["buyhold_return"],
         "差(戦略-放置)": round(b["strategy_return"] - b["buyhold_return"], 1),

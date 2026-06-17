@@ -222,15 +222,15 @@ def main():
     elif page == "今日のアクション":
         views.render_ranking(watch_results, regime, positions, rmap)
     elif page == "個別銘柄分析":
-        views.render_stock(watch_results)
+        views.render_stock(rmap, watch, positions)
     elif page == "ニュース分析":
-        views.render_news(watch_results)
+        views.render_news(rmap, watch, positions)
     elif page == "売買プラン":
-        views.render_plan(watch_results)
+        views.render_plan(rmap, watch, positions)
     elif page == "リスク管理":
-        views.render_risk(watch_results, regime, cap, risk_pct, max_pos)
+        views.render_risk(rmap, watch, positions, regime, cap, risk_pct, max_pos)
     elif page == "バックテスト":
-        views.render_backtest(watch_results)
+        views.render_backtest(rmap, watch, positions)
     elif page == "ポジション台帳":
         views.render_positions(rmap, positions, regime, cap)
     elif page == "🗓 保有ニュース監視":
