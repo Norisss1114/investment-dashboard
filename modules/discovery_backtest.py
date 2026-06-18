@@ -58,6 +58,14 @@ def _snap_at(d, i):
             "above_sma200": price > sma200, "above_sma50": price > sma50, "above_sma20": price > sma20}
 
 
+# ---------------- v18: 取引コスト（往復・%） ----------------
+def _round_trip_cost():
+    """往復コスト(%) = 2 × (手数料 + スリッページ)。設定が無ければ0。"""
+    fee = getattr(config, "BACKTEST_FEE_PCT", 0.0) or 0.0
+    slip = getattr(config, "BACKTEST_SLIPPAGE_PCT", 0.0) or 0.0
+    return 2.0 * (float(fee) + float(slip))
+
+
 # ---------------- トレードのシミュレーション ----------------
 def _simulate(d, entry_idx, hold, entry_price, take_rule, stop_rule):
     n = len(d)
@@ -179,6 +187,7 @@ def run_backtest(params, progress_cb=None):
     trades = []
     rng = np.random.default_rng(42)
     random_trades = []
+    rt_cost = _round_trip_cost()  # v18: 往復取引コスト(%)
 
     for n_done, i in enumerate(test_idx, 1):
         # PITスコア計算
@@ -238,10 +247,11 @@ def run_backtest(params, progress_cb=None):
                 continue
             pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
             ex_idx = min(e_idx + days, L - 1)
+            pnl_net = pnl - rt_cost  # v18: 往復コスト控除（pnl_pct はネット、pnl_gross はコスト前）
             trades.append({
                 "date": str(date.date()), "ticker": t, "score": sc, "verdict": vd, "rank": rank,
                 "entry": round(e_price, 2), "exit": round(e_price * (1 + pnl / 100), 2),
-                "pnl_pct": round(pnl, 2), "days": days, "reason": why,
+                "pnl_gross": round(pnl, 2), "pnl_pct": round(pnl_net, 2), "days": days, "reason": why,
                 "sector": theme_fit[t][1], "theme": "/".join(theme_fit[t][2][:2]),
                 "exit_date": str(common[ex_idx].date()), "entry_rsi": round(float(snap.get("rsi", 50)), 0),
             })
@@ -258,7 +268,8 @@ def run_backtest(params, progress_cb=None):
                 if e_price <= 0:
                     continue
                 pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
-                random_trades.append({"date": str(date.date()), "pnl_pct": round(pnl, 2), "days": days})
+                random_trades.append({"date": str(date.date()), "pnl_gross": round(pnl, 2),
+                                      "pnl_pct": round(pnl - rt_cost, 2), "days": days})
         if progress_cb:
             progress_cb("検証", n_done, len(test_idx), 0, str(date.date()))
 
@@ -356,11 +367,17 @@ def _aggregate(trades, random_trades, bench, common, period_bars, params):
     # 比較対象
     rand_pnls = [t["pnl_pct"] for t in random_trades]
     rcurve, _, _, rand_total = _equity_and_dd(sorted(random_trades, key=lambda x: x["date"])) if random_trades else ([], [], 0, 0)
+    # v18: ベンチ（買い持ち）は1往復分のコストを控除
+    rt = _round_trip_cost()
+
+    def _net_bench(v):
+        return round(v - rt, 1) if v is not None else None
+
     comparisons = {
         "発掘ルール": total_ret,
         "ランダム同数": rand_total,
-        "S&P500(SPY)放置": _benchmark_return(bench.get("SPY"), common, period_bars),
-        "NASDAQ100(QQQ)放置": _benchmark_return(bench.get("QQQ"), common, period_bars),
+        "S&P500(SPY)放置": _net_bench(_benchmark_return(bench.get("SPY"), common, period_bars)),
+        "NASDAQ100(QQQ)放置": _net_bench(_benchmark_return(bench.get("QQQ"), common, period_bars)),
     }
 
     suggestions = _suggestions(trades, by_verdict, by_bucket, by_sector, top_cmp, base)

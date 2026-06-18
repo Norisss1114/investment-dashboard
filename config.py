@@ -412,6 +412,9 @@ BACKTEST_STOP_PCT = 8.0        # 損切り幅(%)
 BACKTEST_TP1_PCT = 10.0        # 利確1(%)
 BACKTEST_TP2_PCT = 20.0        # 利確2(%)
 BACKTEST_TRAIL_PCT = 8.0       # トレーリング幅(%)
+# v18: 取引コスト（片道・%）。往復 = 2 × (手数料 + スリッページ)
+BACKTEST_FEE_PCT = 0.05        # 手数料（片道, %）
+BACKTEST_SLIPPAGE_PCT = 0.05   # スリッページ（片道, %）
 BACKTEST_CACHE_PATH = "user_data/backtest_cache.json"
 BACKTEST_TRADES_PATH = "user_data/backtest_trades.csv"
 

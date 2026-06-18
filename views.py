@@ -1842,7 +1842,9 @@ def _render_bt_result(r):
         st.write(line)
     if r.get("fail"):
         st.caption(f"取得失敗でスキップ: {len(r['fail'])}銘柄（落ちずに継続）。")
-    st.caption("⚠️ 過去検証の限界: 取引コスト・スリッページ・流動性・当時のニュースは未反映。結果は将来を保証しません。")
+    _rt = 2 * (getattr(config, "BACKTEST_FEE_PCT", 0.0) + getattr(config, "BACKTEST_SLIPPAGE_PCT", 0.0))
+    st.caption(f"⚠️ 取引コスト（往復 約{_rt:.2f}%＝手数料+スリッページ）を控除済み（v18）。"
+               "発掘・ランダムは毎トレード、SPY/QQQは1往復ぶん。流動性・当時のニュースは未反映で将来を保証しません。")
 
 
 # ================================================================== v10: ルール最適化
