@@ -191,3 +191,79 @@ def compare_with_yfinance(fund, edgar):
         out[ykey] = {"label": label, "yf": yv, "edgar": ev,
                      "diff_pp": (round((ev - yv) * 100, 1) if (yv is not None and ev is not None) else None)}
     return out
+
+
+# v26.1: ファンダ品質チェック（表示のみ・スコア非使用）
+_MAIN_KEYS = ["revenue", "net_income", "eps", "assets", "liabilities", "equity",
+              "gross_profit", "operating_income", "operating_cash_flow"]
+# (注意しきい, 大乖離しきい) ポイント%
+_DIFF_THRESH = {"margin": (5, 15), "rev_g": (10, 25), "eps_g": (20, 50)}
+
+
+def _diff_level(diff_pp, thr):
+    if diff_pp is None:
+        return "判定不可"
+    a = abs(diff_pp)
+    if a < thr[0]:
+        return "OK"
+    if a < thr[1]:
+        return "注意"
+    return "大きな乖離"
+
+
+def quality_check(edgar, fund):
+    """EDGAR×yfinance のファンダ品質を判定（表示のみ）。
+    返り値: quality/confidence(高中低), reasons, warnings, missing_count, freshness_days, diff_checks。
+    取得失敗・None・欠損でも落ちない。"""
+    edgar = edgar or {}
+    if not edgar.get("ok"):
+        return {"quality": "低", "confidence": "低", "reasons": ["EDGAR取得失敗"],
+                "warnings": ["SECデータ未取得"], "missing_count": None,
+                "freshness_days": None, "diff_checks": {}}
+
+    fresh = edgar.get("freshness_days")
+    missing = sum(1 for k in _MAIN_KEYS if edgar.get(k) is None)
+    present = len(_MAIN_KEYS) - missing
+
+    cmp = compare_with_yfinance(fund, edgar)
+    diff_checks = {}
+    for key in ("margin", "rev_g", "eps_g"):
+        d = dict(cmp.get(key, {}))
+        d["level"] = _diff_level(d.get("diff_pp"), _DIFF_THRESH[key])
+        diff_checks[key] = d
+    big = any(d["level"] == "大きな乖離" for d in diff_checks.values())
+
+    reasons, warnings = [], []
+    if fresh is None:
+        reasons.append("filing date 不明")
+    elif fresh <= 180:
+        reasons.append(f"filing {fresh}日前 → 鮮度良好")
+    elif fresh <= 365:
+        reasons.append(f"filing {fresh}日前 → 許容")
+    else:
+        reasons.append(f"filing {fresh}日前 → 古い")
+        warnings.append(f"データが古い（{fresh}日前）")
+    reasons.append(f"主要項目 {present}/{len(_MAIN_KEYS)} 取得（欠損 {missing}）")
+    if present < 2:
+        warnings.append("主要項目が少なすぎる")
+    for key in ("margin", "rev_g", "eps_g"):
+        d = diff_checks[key]; dp = d.get("diff_pp"); lab = d.get("label", key)
+        if dp is None:
+            reasons.append(f"{lab}差: 判定不可（片方欠損）")
+        elif d["level"] == "OK":
+            reasons.append(f"{lab}差 {abs(dp):.1f}pt → 問題なし")
+        else:
+            tail = "要注意" if d["level"] == "注意" else "大きな乖離 → 要確認"
+            reasons.append(f"{lab}差 {abs(dp):.1f}pt → {tail}")
+            warnings.append(f"{lab}差 {dp:+.1f}pt（{d['level']}）")
+
+    too_old = (fresh is not None and fresh > 365)
+    if too_old or present < 2 or big:
+        quality = "低"
+    elif (fresh is not None and fresh <= 180) and present >= 3 and not big:
+        quality = "高"
+    else:
+        quality = "中"
+
+    return {"quality": quality, "confidence": quality, "reasons": reasons, "warnings": warnings,
+            "missing_count": missing, "freshness_days": fresh, "diff_checks": diff_checks}

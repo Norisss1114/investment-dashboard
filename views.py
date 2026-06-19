@@ -403,6 +403,7 @@ def _render_sec_edgar(ticker, fund):
             return
         if not e.get("ok"):
             st.info("SECデータ未取得（" + e.get("reason", "") + "）。")
+            _render_sec_quality(e, fund)
             return
         c = st.columns(3)
         c[0].metric("最新売上", _fmt_big(e.get("revenue")))
@@ -435,6 +436,31 @@ def _render_sec_edgar(ticker, fund):
                  "差(pp)": (v["diff_pp"] if v["diff_pp"] is not None else "—")} for v in cmp.values()]
         st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
         st.caption("※SEC EDGAR 公式（直近年次）。**スコア計算には使用していません（参考表示）。** 値の単位・期は会社により異なります。")
+
+        _render_sec_quality(e, fund)
+
+
+_QUALITY_COLOR = {"高": "#16a34a", "中": "#eab308", "低": "#dc2626"}
+
+
+def _render_sec_quality(edgar, fund):
+    """v26.1: ファンダ品質チェック（表示のみ・スコア非使用）。"""
+    q = sec_mod.quality_check(edgar, fund)
+    qc = _QUALITY_COLOR.get(q["quality"], "#64748b")
+    cc = _QUALITY_COLOR.get(q["confidence"], "#64748b")
+    st.markdown("**🧪 ファンダ品質チェック**")
+    st.markdown(
+        f'<div style="font-size:0.95rem;">総合品質：<b style="color:{qc};">{q["quality"]}</b>　'
+        f'｜SEC取得信頼度：<b style="color:{cc};">{q["confidence"]}</b>　'
+        f'｜データ鮮度：{(str(q["freshness_days"]) + "日前") if isinstance(q["freshness_days"], int) else "—"}　'
+        f'｜欠損項目：{q["missing_count"] if q["missing_count"] is not None else "—"}</div>',
+        unsafe_allow_html=True)
+    if q["warnings"]:
+        st.warning("⚠️ yfinanceとの差分/注意点: " + " ／ ".join(q["warnings"]))
+    with st.expander("判定理由", expanded=False):
+        for r in q["reasons"]:
+            st.markdown(f"- {r}")
+    st.caption("※品質チェックは参考表示です。**スコア・発掘ランキングには一切反映していません。**")
 
 
 # ============================================================ 個別銘柄分析
