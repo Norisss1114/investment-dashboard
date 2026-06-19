@@ -15,6 +15,7 @@ from modules import data_fetch as data_fetch_mod
 from modules import goal_plan as gp_mod
 from modules import scenario as scen_mod
 from modules import sec_edgar as sec_mod
+from modules import news_calibration as ncal_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -463,6 +464,51 @@ def _render_sec_quality(edgar, fund):
     st.caption("※品質チェックは参考表示です。**スコア・発掘ランキングには一切反映していません。**")
 
 
+def _render_news_calibration(ticker):
+    """v27: ニュース較正データ（実日付付きニュース＋後続リターンの保存/更新・表示のみ）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切影響しない。ボタン実行のみ。"""
+    with st.expander("🧪 ニュース較正データ（実日付ニュース＋後続リターン／本番スコア未使用）", expanded=False):
+        st.caption("ニュース（実日付付きのみ）と、その後の株価リターンを保存して将来の較正に使います。"
+                   "**スコア・発掘ランキングには一切反映しません。** ボタン実行のみ（自動取得しません）。")
+        if not config.get_secret("FINNHUB_API_KEY"):
+            st.warning("FINNHUB_API_KEY未設定です。実日付付きニュースを取得できないため保存できません"
+                       "（Streamlit Secrets / 環境変数 / .env に設定してください）。")
+
+        c = st.columns(2)
+        if c[0].button("📥 この銘柄のニュースを較正データに保存", key=f"ncal_save_{ticker}", width='stretch'):
+            with st.spinner("Finnhub からニュース取得中…"):
+                ok, msg = ncal_mod.add_for_ticker(ticker)
+            (st.success if ok else st.warning)(msg)
+        if c[1].button("🔄 較正リターンを更新", key=f"ncal_upd_{ticker}", width='stretch'):
+            with st.spinner("価格履歴からリターンを計算中…"):
+                n = ncal_mod.update_returns()
+            st.success(f"{n} 件のリターンを更新しました（mock/失敗は unavailable）。")
+
+        recs = ncal_mod.list_all(ticker)
+        total = len(ncal_mod.list_all())
+        st.caption(f"保存件数：全体 {total} 件 ／ {ticker} {len(recs)} 件")
+        if not recs:
+            st.info("この銘柄の較正データはまだありません。上のボタンで保存してください。")
+            return
+        recs = sorted(recs, key=lambda r: r.get("news_date", ""), reverse=True)
+
+        def _f(v, suf="%"):
+            return (f"{v:+.1f}{suf}" if isinstance(v, (int, float)) else "—")
+
+        rows = [{
+            "日付": r.get("news_date", "—"),
+            "見出し": (r.get("headline", "") or "")[:50],
+            "impact": (r.get("impact_score") if r.get("impact_score") is not None else "—"),
+            "sentiment": r.get("sentiment", "—"),
+            "ret_7": _f(r.get("ret_7")),
+            "ret_30": _f(r.get("ret_30")),
+            "vs_spy_30": _f(r.get("vs_spy_30")),
+            "status": r.get("status", "—"),
+        } for r in recs]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        st.caption("※実日付付き（Finnhub datetime）のニュースのみ保存。**スコア・ランキングには未使用（較正用データ）。**")
+
+
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):
     st.header("🔎 個別銘柄分析")
@@ -507,6 +553,7 @@ def render_stock(rmap, watch=None, positions=None):
 
     _render_scenario_forecast(r, sel, f, psrc, positions)
     _render_sec_edgar(sel, f)
+    _render_news_calibration(sel)
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
