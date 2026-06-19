@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import config
 from modules import engine, scoring, universe, storage
 from modules import themes as themes_mod
+from modules import data_fetch  # v19.1: SPY/QQQ取得（read-only呼び出しのみ・data_fetchは未編集）
 
 W = config.DISCOVERY_WEIGHTS
 
@@ -210,6 +211,35 @@ def _attach_rankings(items, excluded, pool):
         attach(it)
 
 
+# ============================ v19.1: SPY/QQQ 実比較（表示のみ） ============================
+def _bench_ret60(ticker):
+    """SPY/QQQ の60日リターン。実データ(yfinance)以外（mock/失敗）は None で比較しない。"""
+    try:
+        df, src = data_fetch.get_price_history(ticker, config.PRICE_PERIOD, config.PRICE_INTERVAL, use_cache=True)
+        if src != "yfinance":
+            return None
+        return _ret60(df)
+    except Exception:
+        return None
+
+
+def _attach_vs_benchmarks(items, excluded):
+    """各 item に vs SPY / vs QQQ（60日超過リターン, %ポイント）を付与。
+    ベンチが取れない（mock/失敗）場合は付与しない＝view側で非表示。"""
+    spy = _bench_ret60("SPY")
+    qqq = _bench_ret60("QQQ")
+    if spy is None and qqq is None:
+        return
+    for it in list(items) + list(excluded):
+        r = it.get("ret60")
+        if r is None:
+            continue
+        if spy is not None:
+            it["vs_spy"] = round((r - spy) * 100, 1)
+        if qqq is not None:
+            it["vs_qqq"] = round((r - qqq) * 100, 1)
+
+
 def sector_rotation(pass1):
     agg = {}
     for p in pass1:
@@ -371,6 +401,7 @@ def _finalize(results, sources, strat=None):
             "stop": plan.get("stop"), "tp1": plan.get("tp1"), "tp2": plan.get("tp2"),
             "hold": plan.get("hold", "数週間〜数ヶ月"),
             "risk_points": (p["excl"] + p["risk_pts"]) or ["特になし"],
+            "ret60": p.get("ret60"),  # v19.1: vs SPY/QQQ 計算用
         }
         if p["screen_fail"] or p["excl"]:
             item["excluded"] = True; item["exclude_reasons"] = p["screen_fail"] + p["excl"]
@@ -428,6 +459,7 @@ def scan(scope, universe_mode, analysis_mode, market_score, market_mode="中立"
     from modules import strategy as strat_mod
     strat = strat_mod.resolved()
     top20, excluded, rotation = _finalize(results, sources, strat)
+    _attach_vs_benchmarks(top20, excluded)  # v19.1: SPY/QQQ実比較（scan内で1回・表示のみ）
     end = dt.datetime.now(); dur = round(time.time() - t0, 1)
 
     stats = {"loaded": total, "found": total, "capped": False, "cap": config.SCAN_MODES.get(universe_mode, 0),

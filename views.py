@@ -1396,6 +1396,18 @@ def _leader_badge(it):
             f'font-size:0.72rem;font-weight:700;">{ld}</span>')
 
 
+def _vs_line(it):
+    """v19.1: vs SPY / vs QQQ（60日超過リターン）の色付きHTML（あるものだけ・無ければ空）。"""
+    parts = []
+    for label, key in [("vs SPY", "vs_spy"), ("vs QQQ", "vs_qqq")]:
+        v = it.get(key)
+        if v is None:
+            continue
+        c = "#16a34a" if v >= 0 else "#dc2626"
+        parts.append(f'<span style="color:{c};font-weight:700;">{label} {v:+.1f}%</span>')
+    return "　".join(parts)
+
+
 def _disc_rank_line(it):
     """v19: セクター順位・市場上位%・相対強度% を1行に（あるものだけ）。"""
     parts = []
@@ -1440,6 +1452,9 @@ def _render_discovery_result(disc, regime):
                 _rl = _disc_rank_line(it)
                 if _rl:
                     st.caption("📊 " + _rl)
+                _vs = _vs_line(it)
+                if _vs:
+                    st.markdown(f'<div style="font-size:0.82rem;">{_vs}</div>', unsafe_allow_html=True)
                 for rsn in it["reasons"]:
                     st.write("・" + rsn)
                 nd = it.get("news_driver")
@@ -1467,6 +1482,9 @@ def _render_discovery_result(disc, regime):
                     _rl = _disc_rank_line(it)
                     if _rl:
                         st.markdown(f'<span style="font-size:0.78rem;color:#64748b;">📊 {_rl}</span>', unsafe_allow_html=True)
+                    _vs = _vs_line(it)
+                    if _vs:
+                        st.markdown(f'<span style="font-size:0.78rem;">{_vs}</span>', unsafe_allow_html=True)
                     if it.get("reasons"):
                         st.markdown("　".join(f'<span style="font-size:0.82rem;">・{r}</span>' for r in it["reasons"][:3]), unsafe_allow_html=True)
                     rp = it.get("risk_points") or []
@@ -1491,6 +1509,8 @@ def _render_discovery_result(disc, regime):
                               if it.get("sector_rank") and it.get("sector_count") else "—"),
                 "市場上位%": (it.get("market_pct") if it.get("market_pct") is not None else "—"),
                 "相対強度上位%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
+                "vsSPY%": (it.get("vs_spy") if it.get("vs_spy") is not None else "—"),
+                "vsQQQ%": (it.get("vs_qqq") if it.get("vs_qqq") is not None else "—"),
                 "リーダー": it.get("leader") or "—",
                 "発見元": "/".join(it["sources"][:3]), "現在値": it["price"], "スコア": it["score"],
                 "判定": it["verdict"], "信頼度": it["confidence"], "アクション": it["action"],
