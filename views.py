@@ -1277,6 +1277,7 @@ def render_reflection():
 
 # ================================================================== v7: 銘柄発掘（高速・安定）
 from modules import discovery as disc_mod
+from modules import discovery_tracking as track_mod
 from modules import storage as storage_mod
 
 
@@ -1313,7 +1314,14 @@ def _run_scan_with_progress(scope, universe_mode, analysis_mode, regime, watchli
 
 def render_discovery(regime, watchlist):
     st.header("🔍 銘柄発掘（高速・安定版）")
+    tab1, tab2 = st.tabs(["🔍 発掘", "📈 発掘追跡"])
+    with tab1:
+        _render_discovery_scan(regime, watchlist)
+    with tab2:
+        _render_discovery_tracking()
 
+
+def _render_discovery_scan(regime, watchlist):
     c1, c2 = st.columns(2)
     universe_mode = c1.selectbox("ユニバース規模", list(config.SCAN_MODES),
                                  index=list(config.SCAN_MODES).index(config.DEFAULT_SCAN_MODE), key="scan_mode")
@@ -1381,6 +1389,81 @@ def render_discovery(regime, watchlist):
     if log:
         with st.expander(f"🧾 スキャンログ（直近{min(len(log),10)}件）", expanded=False):
             st.dataframe(pd.DataFrame(log[-10:][::-1]), width='stretch', height=240)
+
+
+_RESULT_COLOR = {"成功": "#16a34a", "様子見": "#eab308", "失敗": "#dc2626", "追跡中": "#64748b", "未取得": "#94a3b8"}
+
+
+def _track_cell(rec, n):
+    """7/30/60/90日セルの表示：未到達/未取得/値。"""
+    import datetime as _dt
+    try:
+        d0 = _dt.date.fromisoformat(rec["discovered_at"])
+    except Exception:
+        return "—"
+    if _dt.date.today() < d0 + _dt.timedelta(days=n):
+        return "未到達"
+    v = rec.get(f"ret_{n}")
+    return f"{v:+.1f}%" if v is not None else "未取得"
+
+
+def _render_discovery_tracking():
+    st.caption("発掘カードの「📌 追跡に追加」で候補を保存し、後日「🔄 実績を更新」で7/30/60/90日リターンや"
+               "SPY/QQQ比較を計算します。⚠️ 表示は教育・分析用。投資助言ではありません。")
+    recs = track_mod.load()
+    if not recs:
+        st.info("まだ追跡候補がありません。『🔍 発掘』タブのカードで「📌 追跡に追加」を押してください。")
+        return
+
+    cc = st.columns([1, 1, 2])
+    if cc[0].button("🔄 実績を更新", width='stretch', key="track_update"):
+        with st.spinner("実績を更新中…（価格取得）"):
+            n = track_mod.update()
+        st.success(f"{n}件を更新しました。")
+        recs = track_mod.load()
+    if cc[1].button("🗑 全クリア", width='stretch', key="track_clear"):
+        track_mod.clear()
+        st.success("追跡をクリアしました。")
+        recs = track_mod.load()
+    if not recs:
+        return
+
+    # 集計
+    s = track_mod.summary(recs)
+    m = st.columns(5)
+    m[0].metric("成功", s.get("成功", 0))
+    m[1].metric("様子見", s.get("様子見", 0))
+    m[2].metric("失敗", s.get("失敗", 0))
+    m[3].metric("追跡中", s.get("追跡中", 0))
+    m[4].metric("未取得", s.get("未取得", 0))
+
+    import datetime as _dt
+    today = _dt.date.today()
+    rows = []
+    for r in recs:
+        try:
+            elapsed = (today - _dt.date.fromisoformat(r["discovered_at"])).days
+        except Exception:
+            elapsed = "—"
+        rows.append({
+            "銘柄": r["ticker"], "発掘日": r["discovered_at"],
+            "発掘価格": r.get("discovery_price"), "現在価格": (r.get("current_price") if r.get("current_price") is not None else "—"),
+            "経過日数": elapsed,
+            "現在%": (f'{r["ret_current"]:+.1f}%' if r.get("ret_current") is not None else "—"),
+            "7日": _track_cell(r, 7), "30日": _track_cell(r, 30),
+            "60日": _track_cell(r, 60), "90日": _track_cell(r, 90),
+            "vsSPY": (f'{r["vs_spy_30"]:+.1f}%' if r.get("vs_spy_30") is not None else "—"),
+            "vsQQQ": (f'{r["vs_qqq_30"]:+.1f}%' if r.get("vs_qqq_30") is not None else "—"),
+            "結果": r.get("result", "追跡中"),
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df.style.map(lambda v: f'background-color:{_RESULT_COLOR.get(v,"#64748b")};color:white;font-weight:700;',
+                     subset=["結果"]),
+        width='stretch', hide_index=True, height=min(560, 80 + 34 * len(rows)))
+    st.caption("判定（30日主）: 成功=30日+5%以上 or vsSPY+3%以上 ／ 失敗=−5%以下 or vsSPY−3%以下 ／ "
+               "その間=様子見 ／ 30日未到達=追跡中 ／ 取得失敗=未取得。"
+               f"取引コスト未考慮。data_fetch read-only・mock時は未取得。")
 
 
 _LEADER_COLOR = {"リーダー": "#15803d", "フォロワー": "#0ea5e9", "弱い": "#dc2626"}
@@ -1515,11 +1598,14 @@ def _render_discovery_result(disc, regime):
                              _reason_chips(it.get("reasons"), limit=6)):
                     if html:
                         st.markdown(html, unsafe_allow_html=True)
-                # 6. ウォッチ追加ボタン
+                # 6. ウォッチ追加ボタン / 追跡に追加
                 if wl_has(it["ticker"]):
                     st.caption("✅ ウォッチ登録済み")
                 elif st.button("☆ ウォッチ追加", key=f"disc_top_wl_{it['ticker']}", width='stretch'):
                     wl_add(it["ticker"])
+                if st.button("📌 追跡に追加", key=f"track_add_top_{it['ticker']}", width='stretch'):
+                    ok, msg = track_mod.add(it)
+                    (st.success if ok else st.info)(msg)
                 # 7. 詳細は expander
                 with st.expander("詳細を見る", expanded=False):
                     nd = it.get("news_driver")
@@ -1563,6 +1649,9 @@ def _render_discovery_result(disc, regime):
                         st.caption("✅ 登録済み")
                     elif st.button("☆ ウォッチ追加", key=f"disc_wl_{it['ticker']}", width='stretch'):
                         wl_add(it["ticker"])
+                    if st.button("📌 追跡", key=f"track_add_{it['ticker']}", width='stretch'):
+                        ok, msg = track_mod.add(it)
+                        (st.success if ok else st.info)(msg)
         if len(top20) > show_n:
             st.caption(f"上位{show_n}件をカード表示。下の『もっと見る』で全{len(top20)}件の詳細テーブル。")
 

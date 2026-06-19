@@ -397,6 +397,7 @@ DISCOVERY_TIMEOUT_SEC = 20      # 1銘柄あたりの取得タイムアウト
 DISCOVERY_RETRY_COUNT = 1       # 失敗時のリトライ回数
 
 DISCOVERY_CACHE_PATH = "user_data/discovery_cache.json"   # 差分キャッシュ
+DISCOVERY_TRACKING_PATH = "user_data/discovery_tracking.json"  # v22: 発掘候補の結果追跡
 DISCOVERY_RUNS_PATH = "user_data/discovery_runs.csv"      # スキャンログ
 DISCOVERY_CACHE_FRESH_HOURS = 24   # これ以内なら「新鮮」、超えると「古いデータ」警告
 DISCOVERY_NEWS_TOPN = 40           # 高速モード: 一次通過の上位N銘柄だけニュースAI分析
