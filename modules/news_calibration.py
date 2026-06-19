@@ -501,3 +501,149 @@ def recommendation(records=None):
             "strong": strong, "weak": weak, "low_sample": low_sample,
             "suggestions": suggestions, "data_insufficient": False,
             "next_steps": next_steps}
+
+
+# ---------------- v28: ニューススコア補正案ジェネレーター（表示のみ・スコア非反映） ----------------
+CORR_MIN_SAMPLE = 5  # n>=5 のみ補正案。n<5 は insufficient。
+
+
+def _impact_delta(avg_ret30, avg_vs_spy30, win_rate):
+    """実績指標から impact 補正段階(delta)と根拠ラベル群を返す。該当なしは (0, [])。
+    優先順: 大きく強い/大きく弱い → 強い/弱い。同強度の強弱矛盾は |avg_vs_spy30| で優先。"""
+    ar, av, wr = avg_ret30, avg_vs_spy30, win_rate
+    sr = f"{ar:+.1f}%" if ar is not None else "—"
+    sv = f"{av:+.1f}%" if av is not None else "—"
+    sw = f"{wr}%" if wr is not None else "—"
+
+    def hit(conds):
+        return [c for c, ok in conds if ok]
+
+    big_strong = hit([(f"avg_ret30 {sr}≥+10", ar is not None and ar >= 10),
+                      (f"vsSPY30 {sv}≥+7", av is not None and av >= 7),
+                      (f"勝率{sw}≥70", wr is not None and wr >= 70)])
+    big_weak = hit([(f"avg_ret30 {sr}≤-7", ar is not None and ar <= -7),
+                    (f"vsSPY30 {sv}≤-5", av is not None and av <= -5),
+                    (f"勝率{sw}≤35", wr is not None and wr <= 35)])
+    strong = hit([(f"avg_ret30 {sr}≥+5", ar is not None and ar >= 5),
+                  (f"vsSPY30 {sv}≥+3", av is not None and av >= 3),
+                  (f"勝率{sw}≥60", wr is not None and wr >= 60)])
+    weak = hit([(f"avg_ret30 {sr}≤-3", ar is not None and ar <= -3),
+                (f"vsSPY30 {sv}≤-3", av is not None and av <= -3),
+                (f"勝率{sw}≤45", wr is not None and wr <= 45)])
+
+    # 1) 大きく強い / 大きく弱い（同時該当は |avg_vs_spy30| 比較、無ければ +2 優先）
+    if big_strong and big_weak:
+        if av is not None and av < 0:
+            return -2, big_weak
+        return 2, big_strong
+    if big_strong:
+        return 2, big_strong
+    if big_weak:
+        return -2, big_weak
+    # 2) 強い / 弱い（同時該当は |avg_vs_spy30| 比較、無ければ +1 優先）
+    if strong and weak:
+        if av is not None and av < 0:
+            return -1, weak
+        return 1, strong
+    if strong:
+        return 1, strong
+    if weak:
+        return -1, weak
+    return 0, []
+
+
+def _clamp_score(v):
+    return max(-5, min(5, v))
+
+
+def correction_proposals(records=None):
+    """較正データの集計(analytics)から、impact/sentiment/category の補正案を生成（表示のみ）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    n>=5 のみ補正対象。n<5 は insufficient。空/未更新でも落ちない。"""
+    a = analytics(records)
+    ov = a["overall"]
+    ret30_count = ov.get("ret30_count", 0) or 0
+    confidence = "高" if ret30_count >= 10 else "中" if ret30_count >= 5 else "低"
+
+    impact_props, sentiment_props, category_props, insufficient = [], [], [], []
+
+    # ---- impact_score 補正 ----
+    for r in a.get("by_impact", []):
+        n = r.get("n") or 0
+        if n < CORR_MIN_SAMPLE:
+            insufficient.append({"block": "impact", "label": r["label"], "n": n})
+            continue
+        delta, why = _impact_delta(r.get("avg_ret30"), r.get("avg_vs_spy30"), r.get("win_rate"))
+        if delta == 0:
+            continue
+        cur = r["label"]
+        recommended = _clamp_score(cur + delta)
+        if recommended == cur:  # 上限/下限で動かない場合は補正案にしない
+            continue
+        if delta > 0:
+            reason = "中impactだが実績が強く、" + "・".join(why) + " → 過小評価の可能性"
+            if cur >= 4:
+                reason = "実績が強く " + "・".join(why) + " → さらに上方の可能性"
+        else:
+            reason = "高impactなのに実績が弱く、" + "・".join(why) + " → 過大評価の可能性"
+            if cur <= 0:
+                reason = "実績が弱く " + "・".join(why) + " → さらに下方の可能性"
+        impact_props.append({
+            "label": cur, "current_score": cur, "recommended_score": recommended, "delta": delta,
+            "reason": reason, "n": n, "avg_ret30": r.get("avg_ret30"),
+            "avg_vs_spy30": r.get("avg_vs_spy30"), "win_rate": r.get("win_rate")})
+    impact_props.sort(key=lambda x: x["label"])
+
+    # ---- sentiment 評価（定性のみ・数値補正なし） ----
+    for r in a.get("by_sentiment", []):
+        n = r.get("n") or 0
+        if n < CORR_MIN_SAMPLE:
+            insufficient.append({"block": "sentiment", "label": r["label"], "n": n})
+            continue
+        ar, av, wr = r.get("avg_ret30"), r.get("avg_vs_spy30"), r.get("win_rate")
+        strong = ((ar is not None and ar >= 5) or (av is not None and av >= 3)
+                  or (wr is not None and wr >= 60))
+        weak_down = ((ar is not None and ar <= -3) or (av is not None and av <= -3))
+        lab = r["label"]
+        if lab == "bull":
+            ev = "bull信頼度 高" if strong else "bull信頼度 低/要確認"
+            reason = ("bull判定が実際にプラスを出している" if strong
+                      else "bull判定だが実績が伴っていない")
+        elif lab == "bear":
+            ev = "bear信頼度 高" if weak_down else "bear信頼度 低/要確認"
+            reason = ("bear判定が実際に下げている" if weak_down
+                      else "bear判定だが実際は下げていない")
+        else:  # neutral
+            if strong:
+                ev, reason = "neutral過小評価", "neutralでも実績が強い → 過小評価の可能性"
+            elif weak_down:
+                ev, reason = "neutral弱い", "neutralで実績も弱い"
+            else:
+                ev, reason = "neutral妥当", "neutralは概ね中立的な実績"
+        sentiment_props.append({"label": lab, "evaluation": ev, "reason": reason,
+                                "n": n, "avg_ret30": ar, "avg_vs_spy30": av, "win_rate": wr})
+
+    # ---- category 補正（+1 / -1。0 は出さない） ----
+    for r in a.get("by_category", []):
+        n = r.get("n") or 0
+        if n < CORR_MIN_SAMPLE:
+            insufficient.append({"block": "category", "label": r["label"], "n": n})
+            continue
+        ar, av, wr = r.get("avg_ret30"), r.get("avg_vs_spy30"), r.get("win_rate")
+        strong = (ar is not None and ar >= 5) or (av is not None and av >= 3)
+        weak = (ar is not None and ar <= -3) or (av is not None and av <= -3)
+        sr = f"{ar:+.1f}%" if ar is not None else "—"
+        sv = f"{av:+.1f}%" if av is not None else "—"
+        if strong and not weak:
+            corr, reason = 1, f"強いカテゴリ（ret30 {sr} / vsSPY30 {sv}）→ +1 補正候補"
+        elif weak:
+            corr, reason = -1, f"弱いカテゴリ（ret30 {sr} / vsSPY30 {sv}）→ -1 補正候補"
+        else:
+            continue
+        category_props.append({"label": r["label"], "correction": corr, "reason": reason,
+                               "n": n, "avg_ret30": ar, "avg_vs_spy30": av, "win_rate": wr})
+
+    data_insufficient = (ret30_count == 0)
+    return {"confidence": confidence, "impact": impact_props, "sentiment": sentiment_props,
+            "category": category_props, "insufficient": insufficient,
+            "data_insufficient": data_insufficient}

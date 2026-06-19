@@ -584,8 +584,77 @@ def _render_news_calibration_analytics():
                     st.markdown(f"- {ns}")
         st.caption("※集計・提案は参考表示です。**ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
+        # 🧭 v28: ニューススコア補正案（表示のみ・本番非反映）
+        _render_news_score_corrections()
+
         # 📌 v27.2: 検証候補として保存（本番非反映）
         _render_news_adoption()
+
+
+def _render_news_score_corrections():
+    """v28: ニューススコア補正案ジェネレーター（表示のみ・本番スコア非反映）。"""
+    st.divider()
+    st.subheader("🧭 ニューススコア補正案")
+    cp = ncal_mod.correction_proposals()
+    if cp.get("data_insufficient"):
+        st.info("補正案を出せる更新済みデータ（ret_30 計算済み）がまだありません。")
+        return
+
+    def _f(v):
+        return (f"{v:+.1f}%" if isinstance(v, (int, float)) else "—")
+
+    if cp["confidence"] != "高":
+        st.warning("サンプルが少ないため参考値です。まだニューススコアには反映しないでください。")
+    st.caption(f"信頼度：{cp['confidence']}（補正対象は n≥5 のみ）")
+
+    # 1) impact_score 補正案
+    st.markdown("**1. impact_score 補正案**")
+    if cp["impact"]:
+        rows = [{
+            "現在score": p["current_score"], "推奨score": p["recommended_score"],
+            "delta": f'{p["delta"]:+d}', "n": p["n"],
+            "avg_ret30": _f(p["avg_ret30"]), "avg_vsSPY30": _f(p["avg_vs_spy30"]),
+            "win_rate%": (p["win_rate"] if p["win_rate"] is not None else "—"),
+            "根拠": p["reason"],
+        } for p in cp["impact"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("補正対象なし（delta=0 または n<5）。")
+
+    # 2) sentiment 評価
+    st.markdown("**2. sentiment 評価（定性のみ・数値補正なし）**")
+    if cp["sentiment"]:
+        rows = [{
+            "sentiment": p["label"], "評価": p["evaluation"], "n": p["n"],
+            "avg_ret30": _f(p["avg_ret30"]), "avg_vsSPY30": _f(p["avg_vs_spy30"]),
+            "win_rate%": (p["win_rate"] if p["win_rate"] is not None else "—"),
+            "根拠": p["reason"],
+        } for p in cp["sentiment"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("評価対象なし（n<5）。")
+
+    # 3) category 補正案
+    st.markdown("**3. category 補正案（+1 / -1）**")
+    if cp["category"]:
+        rows = [{
+            "category": p["label"], "補正候補": f'{p["correction"]:+d}', "n": p["n"],
+            "avg_ret30": _f(p["avg_ret30"]), "avg_vsSPY30": _f(p["avg_vs_spy30"]),
+            "win_rate%": (p["win_rate"] if p["win_rate"] is not None else "—"),
+            "根拠": p["reason"],
+        } for p in cp["category"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("補正対象なし（n<5 または中間）。")
+
+    # 4) サンプル不足
+    if cp["insufficient"]:
+        with st.expander(f"サンプル不足（n<5・補正案に未使用）{len(cp['insufficient'])}件", expanded=False):
+            for r in cp["insufficient"]:
+                st.caption(f"・[{r['block']}]「{r['label']}」 n={r['n']}")
+
+    st.info("これは表示のみで、本番ニューススコアには反映していません。"
+            "サンプルが少ない場合は採用しないでください。")
 
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
