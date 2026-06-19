@@ -50,6 +50,7 @@ def add(item):
         "sector": item.get("sector"), "reasons": (item.get("reasons") or [])[:6],
         "market_pct": item.get("market_pct"), "sector_rank": item.get("sector_rank"),
         "sector_neutral": item.get("sector_neutral"),
+        "leader": item.get("leader"), "rs_pct": item.get("rs_pct"),  # v22.1: 分析用
         "vs_spy": item.get("vs_spy"), "vs_qqq": item.get("vs_qqq"),
         "vs_etf": item.get("vs_etf"), "etf": item.get("etf"),
         # 実績（未更新）
@@ -189,3 +190,116 @@ def summary(records=None):
     for r in recs:
         out[r.get("result", "追跡中")] = out.get(r.get("result", "追跡中"), 0) + 1
     return out
+
+
+# ---------------- v22.1: 追跡結果の分析（表示のみ） ----------------
+_JUDGED = ("成功", "様子見", "失敗")
+
+
+def _avg(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _group_stats(recs):
+    """判定済みレコード群の統計。成功率/平均ret_30/平均vs_spy_30/件数/勝率。"""
+    judged = [r for r in recs if r.get("result") in _JUDGED]
+    n = len(judged)
+    succ = sum(1 for r in judged if r.get("result") == "成功")
+    ret30 = [r.get("ret_30") for r in judged]
+    vsspy = [r.get("vs_spy_30") for r in judged]
+    pos = [r.get("ret_30") for r in judged if r.get("ret_30") is not None]
+    return {
+        "n": n,
+        "success_rate": round(succ / n * 100) if n else None,
+        "avg_ret30": _avg(ret30),
+        "avg_vs_spy30": _avg(vsspy),
+        "win_rate": (round(sum(1 for v in pos if v > 0) / len(pos) * 100) if pos else None),
+        "success": succ,
+    }
+
+
+def _score_band(score):
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return None
+    if s >= 90:
+        return "90+"
+    if s >= 80:
+        return "80-89"
+    if s >= 70:
+        return "70-79"
+    if s >= 60:
+        return "60-69"
+    return "<60"
+
+
+def _rs_band(rs):
+    if rs is None:
+        return None
+    try:
+        v = float(rs)
+    except (TypeError, ValueError):
+        return None
+    if v <= 10:
+        return "上位10%"
+    if v <= 25:
+        return "上位25%"
+    return "その他"
+
+
+def _breakdown(recs, key_fn, order=None):
+    """key_fn(rec)->ラベル(None=除外) でグルーピングし、各グループの統計を返す。"""
+    groups = {}
+    for r in recs:
+        lab = key_fn(r)
+        if lab is None:
+            continue
+        groups.setdefault(lab, []).append(r)
+    rows = []
+    for lab, lst in groups.items():
+        st = _group_stats(lst)
+        st["label"] = lab
+        st["total"] = len(lst)  # 判定前含む総数
+        rows.append(st)
+    if order:
+        rows.sort(key=lambda x: order.index(x["label"]) if x["label"] in order else 999)
+    else:
+        rows.sort(key=lambda x: -(x["success_rate"] if x["success_rate"] is not None else -1))
+    return rows
+
+
+def analytics(records=None):
+    """追跡データを集計（表示のみ）。空/全追跡中でも落ちない。"""
+    recs = records if records is not None else load()
+    overall = _group_stats(recs)
+    overall["total"] = len(recs)
+
+    by_score = _breakdown(recs, lambda r: _score_band(r.get("score")),
+                          order=["90+", "80-89", "70-79", "60-69", "<60"])
+    by_sector = _breakdown(recs, lambda r: r.get("sector") or None)
+    by_verdict = _breakdown(recs, lambda r: r.get("verdict") or None,
+                            order=["強いBUY", "BUY", "WATCH", "AVOID"])
+    # リーダー別・相対強度別は項目を持つ新規追跡分のみ
+    by_leader = _breakdown([r for r in recs if r.get("leader")], lambda r: r.get("leader"),
+                           order=["リーダー", "フォロワー", "弱い"])
+    by_rs = _breakdown([r for r in recs if r.get("rs_pct") is not None],
+                       lambda r: _rs_band(r.get("rs_pct")), order=["上位10%", "上位25%", "その他"])
+
+    # 発掘理由別（1銘柄が複数理由ならそれぞれにカウント）
+    reason_groups = {}
+    for r in recs:
+        for rsn in (r.get("reasons") or []):
+            reason_groups.setdefault(rsn, []).append(r)
+    by_reason = []
+    for rsn, lst in reason_groups.items():
+        st = _group_stats(lst)
+        st["label"] = rsn
+        st["total"] = len(lst)
+        by_reason.append(st)
+    by_reason.sort(key=lambda x: -(x["success_rate"] if x["success_rate"] is not None else -1))
+
+    return {"overall": overall, "by_score": by_score, "by_sector": by_sector,
+            "by_reason": by_reason, "by_verdict": by_verdict,
+            "by_leader": by_leader, "by_rs": by_rs}

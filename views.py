@@ -1465,6 +1465,48 @@ def _render_discovery_tracking():
                "その間=様子見 ／ 30日未到達=追跡中 ／ 取得失敗=未取得。"
                f"取引コスト未考慮。data_fetch read-only・mock時は未取得。")
 
+    # ---------- v22.1: 📊 発掘成績（集計・表示のみ） ----------
+    _render_tracking_analytics(recs)
+
+
+def _track_bd_df(rows, label_name):
+    """analytics の breakdown 行を表示用 DataFrame に。"""
+    return pd.DataFrame([{
+        label_name: r["label"], "件数": r["total"], "判定済み": r["n"],
+        "成功率%": (r["success_rate"] if r["success_rate"] is not None else "—"),
+        "平均ret30%": (r["avg_ret30"] if r["avg_ret30"] is not None else "—"),
+        "平均vsSPY%": (r["avg_vs_spy30"] if r["avg_vs_spy30"] is not None else "—"),
+    } for r in rows])
+
+
+def _render_tracking_analytics(recs):
+    st.divider()
+    st.subheader("📊 発掘成績")
+    a = track_mod.analytics(recs)
+    ov = a["overall"]
+    if not ov["n"]:
+        st.info("まだ判定済みデータがありません（「🔄 実績を更新」で30日経過分が集計されます）。")
+        return
+    if ov["n"] < 5:
+        st.caption("⚠️ サンプルが少ないため参考値です。")
+    m = st.columns(6)
+    m[0].metric("総追跡数", ov["total"])
+    m[1].metric("判定済み", ov["n"])
+    m[2].metric("成功率", f'{ov["success_rate"]}%' if ov["success_rate"] is not None else "—")
+    m[3].metric("平均ret30", f'{ov["avg_ret30"]:+.1f}%' if ov["avg_ret30"] is not None else "—")
+    m[4].metric("平均vsSPY", f'{ov["avg_vs_spy30"]:+.1f}%' if ov["avg_vs_spy30"] is not None else "—")
+    m[5].metric("ret30プラス率", f'{ov["win_rate"]}%' if ov["win_rate"] is not None else "—")
+
+    blocks = [("スコア帯別", a["by_score"], "スコア帯"), ("セクター別", a["by_sector"], "セクター"),
+              ("発掘理由別", a["by_reason"], "理由"), ("判定別(verdict)", a["by_verdict"], "判定"),
+              ("リーダー別", a["by_leader"], "リーダー"), ("相対強度帯別", a["by_rs"], "相対強度")]
+    for title, rows, label_name in blocks:
+        st.markdown(f"**{title}**")
+        if rows:
+            st.dataframe(_track_bd_df(rows, label_name), width='stretch', hide_index=True)
+        else:
+            st.caption("該当データなし（実績更新後・新規追跡分で集計されます）。")
+
 
 _LEADER_COLOR = {"リーダー": "#15803d", "フォロワー": "#0ea5e9", "弱い": "#dc2626"}
 
