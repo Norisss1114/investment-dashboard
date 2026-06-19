@@ -1422,6 +1422,50 @@ def _disc_rank_line(it):
     return "　".join(parts)
 
 
+def _chip_html(text, color="#374151", bg="#f1f5f9", bold=False):
+    fw = "700" if bold else "600"
+    return (f'<span style="display:inline-block;background:{bg};color:{color};border-radius:999px;'
+            f'padding:2px 9px;margin:2px 2px 0 0;font-size:0.76rem;font-weight:{fw};">{text}</span>')
+
+
+def _wrap_chips(chips):
+    if not chips:
+        return ""
+    return '<div style="display:flex;flex-wrap:wrap;gap:2px;margin:3px 0;">' + "".join(chips) + '</div>'
+
+
+def _rank_chips(it):
+    """v19.3: 市場上位% / セクター順位 / 相対強度 をチップ化（あるものだけ）。"""
+    chips = []
+    if it.get("market_pct") is not None:
+        chips.append(_chip_html(f'市場上位{it["market_pct"]}%', "#1d4ed8", "#dbeafe"))
+    if it.get("sector_rank") and it.get("sector_count"):
+        chips.append(_chip_html(f'{it["sector"]} {it["sector_rank"]}位/{it["sector_count"]}', "#7c3aed", "#ede9fe"))
+    if it.get("rs_pct") is not None:
+        chips.append(_chip_html(f'相対強度 上位{it["rs_pct"]}%', "#0e7490", "#cffafe"))
+    return _wrap_chips(chips)
+
+
+def _vs_chips(it):
+    """v19.3: vs SPY / vs QQQ / vs セクターETF をチップ化（緑＝優位・赤＝劣後）。"""
+    chips = []
+    pairs = [("vs SPY", it.get("vs_spy")), ("vs QQQ", it.get("vs_qqq"))]
+    if it.get("vs_etf") is not None and it.get("etf"):
+        pairs.append((f'vs {it["etf"]}', it.get("vs_etf")))
+    for label, v in pairs:
+        if v is None:
+            continue
+        color, bg = ("#15803d", "#dcfce7") if v >= 0 else ("#b91c1c", "#fee2e2")
+        chips.append(_chip_html(f'{label} {v:+.1f}%', color, bg, bold=True))
+    return _wrap_chips(chips)
+
+
+def _reason_chips(reasons, limit=6):
+    """v19.3: 発掘理由をチップ化（最大 limit 個）。"""
+    chips = [_chip_html(r, "#374151", "#f1f5f9") for r in (reasons or [])[:limit]]
+    return _wrap_chips(chips)
+
+
 def _render_discovery_result(disc, regime):
     stt = disc["stats"]
     s = st.columns(5)
@@ -1444,28 +1488,35 @@ def _render_discovery_result(disc, regime):
         for col, it in zip(cols, top3):
             c = _disc_color(it["verdict"])
             with col:
+                # 1-2. 結論ファースト：ティッカー・会社名・リーダー / 総合スコア・判定
                 st.markdown(
-                    f'<div style="padding:14px;border-radius:14px;border:2px solid {c};background:{c}12;">'
-                    f'<div style="font-size:1.4rem;font-weight:800;color:{c};">{it["ticker"]} '
-                    f'<span style="font-size:0.85rem;color:#64748b;">{it["score"]}点 {it["verdict"]}・信頼{it["confidence"]}</span></div>'
-                    f'<div style="color:#475569;font-size:0.85rem;">{it["name"]}｜{it["sector"]} {_leader_badge(it)}</div>'
-                    f'<div style="color:#64748b;font-size:0.75rem;">発見元: {", ".join(it["sources"][:4])}</div></div>',
-                    unsafe_allow_html=True)
-                _rl = _disc_rank_line(it)
-                if _rl:
-                    st.caption("📊 " + _rl)
-                _vs = _vs_line(it)
-                if _vs:
-                    st.markdown(f'<div style="font-size:0.82rem;">{_vs}</div>', unsafe_allow_html=True)
-                for rsn in it["reasons"]:
-                    st.write("・" + rsn)
-                nd = it.get("news_driver")
-                if nd:
-                    st.write(f'**効くニュース**: {nd["headline"]}（影響{nd["impact"]:+d}）')
-                st.write(f'**買い**: ${it["entry"]}　**損切り**: ${it["stop"]}　**期間**: {it["hold"]}')
-                st.info("📌 " + disc_mod.today_line(it))
-                if it["risk_points"] != ["特になし"]:
-                    st.caption("リスク: " + " / ".join(it["risk_points"]))
+                    f'<div style="padding:12px;border-radius:14px;border:2px solid {c};background:{c}12;">'
+                    f'<div style="font-size:1.3rem;font-weight:800;color:{c};">{it["ticker"]} {_leader_badge(it)}</div>'
+                    f'<div style="color:#475569;font-size:0.82rem;">{it["name"]}｜{it["sector"]}</div>'
+                    f'<div style="margin-top:4px;"><span style="font-size:1.7rem;font-weight:900;color:#1d1d1f;">{it["score"]}</span>'
+                    f'<span style="font-size:0.85rem;color:{c};font-weight:700;"> {it["verdict"]}・信頼{it["confidence"]}</span></div>'
+                    f'</div>', unsafe_allow_html=True)
+                # 3. ランキングチップ / 4. 比較チップ / 5. 発掘理由チップ
+                for html in (_rank_chips(it), _vs_chips(it), _reason_chips(it.get("reasons"), limit=6)):
+                    if html:
+                        st.markdown(html, unsafe_allow_html=True)
+                # 6. ウォッチ追加ボタン
+                if wl_has(it["ticker"]):
+                    st.caption("✅ ウォッチ登録済み")
+                elif st.button("☆ ウォッチ追加", key=f"disc_top_wl_{it['ticker']}", width='stretch'):
+                    wl_add(it["ticker"])
+                # 7. 詳細は expander
+                with st.expander("詳細を見る", expanded=False):
+                    nd = it.get("news_driver")
+                    if nd:
+                        st.write(f'**効くニュース**: {nd["headline"]}（影響{nd["impact"]:+d}）')
+                    st.write(f'**買い**: ${it["entry"]}　**損切り**: ${it["stop"]}　**期間**: {it["hold"]}')
+                    st.info("📌 " + disc_mod.today_line(it))
+                    if it["risk_points"] != ["特になし"]:
+                        st.caption("リスク: " + " / ".join(it["risk_points"]))
+                    if len(it.get("reasons") or []) > 6:
+                        st.caption("その他の理由: " + " / ".join(it["reasons"][6:]))
+                    st.caption("発見元: " + ", ".join(it["sources"][:4]))
 
     if top20:
         st.subheader("📋 発掘ランキング")
@@ -1481,14 +1532,9 @@ def _render_discovery_result(disc, regime):
                                 f'{_leader_badge(it)}</div>'
                                 f'<div style="color:#8a8a8e;font-size:0.8rem;">{it.get("name","")}｜{it["sector"]}｜{_stars(it["score"])}</div>',
                                 unsafe_allow_html=True)
-                    _rl = _disc_rank_line(it)
-                    if _rl:
-                        st.markdown(f'<span style="font-size:0.78rem;color:#64748b;">📊 {_rl}</span>', unsafe_allow_html=True)
-                    _vs = _vs_line(it)
-                    if _vs:
-                        st.markdown(f'<span style="font-size:0.78rem;">{_vs}</span>', unsafe_allow_html=True)
-                    if it.get("reasons"):
-                        st.markdown("　".join(f'<span style="font-size:0.82rem;">・{r}</span>' for r in it["reasons"][:3]), unsafe_allow_html=True)
+                    for html in (_rank_chips(it), _vs_chips(it), _reason_chips(it.get("reasons"), limit=5)):
+                        if html:
+                            st.markdown(html, unsafe_allow_html=True)
                     rp = it.get("risk_points") or []
                     if rp and rp != ["特になし"]:
                         st.markdown(f'<span style="font-size:0.78rem;color:#f97316;">リスク: {" / ".join(rp[:2])}</span>', unsafe_allow_html=True)
@@ -1507,28 +1553,22 @@ def _render_discovery_result(disc, regime):
         with st.expander("📊 もっと見る（全TOP20 詳細テーブル）", expanded=False):
             rows = [{
                 "順位": i, "ティッカー": it["ticker"], "企業": it["name"], "セクター": it["sector"],
+                "スコア": it["score"], "判定": it["verdict"], "アクション": it["action"],
+                "市場上位%": (it.get("market_pct") if it.get("market_pct") is not None else "—"),
                 "セクター順位": (f'{it["sector_rank"]}/{it["sector_count"]}'
                               if it.get("sector_rank") and it.get("sector_count") else "—"),
-                "市場上位%": (it.get("market_pct") if it.get("market_pct") is not None else "—"),
-                "相対強度上位%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
-                "vsSPY%": (it.get("vs_spy") if it.get("vs_spy") is not None else "—"),
-                "vsQQQ%": (it.get("vs_qqq") if it.get("vs_qqq") is not None else "—"),
-                "vsセクターETF": (f'{it["etf"]} {it["vs_etf"]:+.1f}%'
-                               if it.get("vs_etf") is not None and it.get("etf") else "—"),
-                "リーダー": it.get("leader") or "—",
-                "発見元": "/".join(it["sources"][:3]), "現在値": it["price"], "スコア": it["score"],
-                "判定": it["verdict"], "信頼度": it["confidence"], "アクション": it["action"],
-                "ニュース影響": round(it["news_impact"], 1), "テクニカル": it["tech_state"],
-                "エントリー": it["entry"], "損切り": it["stop"], "利確1": it["tp1"], "利確2": it["tp2"],
-                "発掘理由": " / ".join(it["reasons"][:3]), "危険ポイント": " / ".join(it["risk_points"][:2]),
+                "相対強度%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
+                "vsSPY": (it.get("vs_spy") if it.get("vs_spy") is not None else "—"),
+                "vsQQQ": (it.get("vs_qqq") if it.get("vs_qqq") is not None else "—"),
+                "vsETF": (f'{it["etf"]} {it["vs_etf"]:+.1f}%'
+                          if it.get("vs_etf") is not None and it.get("etf") else "—"),
+                "エントリー": it["entry"], "損切り": it["stop"], "利確1": it["tp1"],
             } for i, it in enumerate(top20, 1)]
             df = pd.DataFrame(rows)
             st.dataframe(
                 df.style
                 .map(lambda v: f'background-color:{_disc_color(v)};color:white;font-weight:700;', subset=["判定"])
-                .map(_conf_style, subset=["信頼度"])
-                .format({"現在値": "${:,.2f}", "スコア": "{:.1f}", "ニュース影響": "{:+.1f}",
-                         "エントリー": "${:,.2f}", "損切り": "${:,.2f}", "利確1": "${:,.2f}", "利確2": "${:,.2f}"})
+                .format({"スコア": "{:.1f}", "エントリー": "${:,.2f}", "損切り": "${:,.2f}", "利確1": "${:,.2f}"})
                 .background_gradient(subset=["スコア"], cmap="RdYlGn", vmin=50, vmax=85),
                 width='stretch', height=540)
         st.caption("信頼度『低』はデータ不足のためBUYに昇格させず最大WATCHに制限。")
