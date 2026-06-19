@@ -2149,8 +2149,16 @@ _VERDICT_COLOR = {"改善": "#16a34a", "変化なし": "#64748b", "悪化": "#dc
 
 
 def _render_bt_improvement(watchlist):
-    st.caption("v23の改善提案（相対強度/スコア/市場上位/セクター中立/リーダー）を**仮フィルター**として、"
-               "通常バックテストと比較します。**検証専用で、本番スコア・発掘ランキングには反映しません。**")
+    st.caption("v23の改善提案（相対強度/スコア/市場上位/セクター中立/リーダー）を**仮フィルター**として比較します。"
+               "**検証専用で、本番スコア・発掘ランキングには反映しません。**")
+    mode = st.radio("検証モード", ["通常BT比較", "ウォークフォワード比較"], horizontal=True, key="imp_mode")
+    if mode == "通常BT比較":
+        _render_bt_improvement_single(watchlist)
+    else:
+        _render_bt_improvement_wf(watchlist)
+
+
+def _render_bt_improvement_single(watchlist):
     with st.form("improve_form"):
         c = st.columns(3)
         universe_mode = c[0].selectbox("対象ユニバース", list(config.SCAN_MODES),
@@ -2220,6 +2228,81 @@ def _render_bt_improvement(watchlist):
     st.caption("判定: total_returnがベースライン+3%以上かつトレード数がベースラインの30%以上→改善 ／ −3%以上→悪化 ／ "
                "その他→変化なし ／ トレード数<10→サンプル不足。PIT（当日情報のみ）で検証。"
                "⚠️ **これは検証専用であり、本番スコアには反映していません。**")
+
+
+def _render_bt_improvement_wf(watchlist):
+    st.caption("改善フィルターを**ウォークフォワード（連続OOS）**でも検証します（通常WF vs フィルターWF）。"
+               "**検証専用で、本番スコア・発掘ランキングには反映しません。**")
+    with st.form("improve_wf_form"):
+        c = st.columns(3)
+        universe_mode = c[0].selectbox("対象ユニバース", list(config.SCAN_MODES),
+                                       index=list(config.SCAN_MODES).index(config.DEFAULT_SCAN_MODE), key="impwf_uni")
+        hold = c[1].selectbox("保有期間", list(config.BACKTEST_HOLD), index=1, key="impwf_hold")
+        condition = c[2].selectbox("ベースのスコア条件", config.BACKTEST_CONDITION, index=4, key="impwf_cond")
+        c2 = st.columns(4)
+        entry = c2[0].selectbox("エントリー方式", config.BACKTEST_ENTRY, key="impwf_entry")
+        take = c2[1].selectbox("利確ルール", config.BACKTEST_TAKE, key="impwf_take")
+        stop = c2[2].selectbox("損切りルール", config.BACKTEST_STOP, key="impwf_stop")
+        c3 = st.columns(2)
+        n_folds = c3[0].selectbox("フォールド数", [3, 4, 5, 6],
+                                  index=[3, 4, 5, 6].index(getattr(config, "WF_DEFAULT_FOLDS", 4)), key="impwf_folds")
+        test_months = c3[1].selectbox("各フォールドの検証期間(月)", [2, 3, 6],
+                                      index=[2, 3, 6].index(getattr(config, "WF_DEFAULT_TEST_MONTHS", 3)), key="impwf_tm")
+        names = [n for n, _ in bt_mod2.IMPROVEMENT_FILTERS]
+        chosen = st.multiselect("検証する改善フィルター", names, default=names, key="impwf_filters")
+        submitted = st.form_submit_button("🚶 ウォークフォワードで検証", width='stretch')
+
+    if not submitted:
+        st.info("フィルターを選んで「🚶 ウォークフォワードで検証」を押してください（検証専用・ボタン実行）。")
+        return
+
+    params = {"universe_mode": universe_mode, "period": list(config.BACKTEST_PERIODS)[0], "hold": hold,
+              "entry": entry, "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
+              "watchlist": tuple(watchlist)}
+    filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
+    cb, prog, status = _wf_progress()
+    r = bt_mod2.compare_improvement_walk_forward(params, filters=filters, n_folds=n_folds,
+                                                 test_months=test_months, progress_cb=cb)
+    prog.progress(1.0)
+    if not r.get("ok"):
+        status.write("⚠️ " + r.get("reason", "失敗"))
+        st.error("検証を生成できませんでした: " + r.get("reason", ""))
+        return
+    status.write("✅ 完了")
+
+    bs = r["baseline"]["summary"]
+    st.subheader("📊 通常ウォークフォワード（ベースライン）")
+    mm = st.columns(4)
+    mm[0].metric("平均OOSリターン", f'{bs["avg_oos_return"]:+.1f}%' if bs["avg_oos_return"] is not None else "—")
+    mm[1].metric("プラス収益F率", f'{bs["positive_folds_pct"]}%')
+    mm[2].metric("SPYに勝った率", f'{bs["beat_spy_pct"]}%' if bs["beat_spy_pct"] is not None else "—")
+    mm[3].metric("平均trade", f'{r["baseline"]["avg_trade_count"]:.0f}')
+
+    st.subheader("🚶 改善案 × ウォークフォワード比較")
+    rows = [{
+        "フィルター": "（ベースライン）", "判定": "—",
+        "平均OOS%": bs["avg_oos_return"], "プラスF%": bs["positive_folds_pct"],
+        "SPY勝率%": bs["beat_spy_pct"], "QQQ勝率%": bs["beat_qqq_pct"], "ランダム勝率%": bs["beat_random_pct"],
+        "平均Sharpe": bs["avg_sharpe"], "平均maxDD%": bs["avg_max_dd"], "平均trade": r["baseline"]["avg_trade_count"],
+    }]
+    for v in r["variants"]:
+        s = v["summary"]
+        rows.append({
+            "フィルター": v["name"], "判定": v["verdict"],
+            "平均OOS%": s["avg_oos_return"], "プラスF%": s["positive_folds_pct"],
+            "SPY勝率%": s["beat_spy_pct"], "QQQ勝率%": s["beat_qqq_pct"], "ランダム勝率%": s["beat_random_pct"],
+            "平均Sharpe": s["avg_sharpe"], "平均maxDD%": s["avg_max_dd"], "平均trade": v["avg_trade_count"],
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df.style.map(lambda v: f'background-color:{_VERDICT_COLOR.get(v,"#64748b")};color:white;font-weight:700;'
+                     if v in _VERDICT_COLOR else "", subset=["判定"]),
+        width='stretch', hide_index=True)
+    if r.get("fail"):
+        st.caption(f"取得失敗でスキップ: {len(r['fail'])}銘柄。")
+    st.caption("判定: 平均OOSがベースライン+3%以上かつプラスFolds率が同等以上かつ平均trade≥30%→改善 ／ "
+               "平均OOS−3%以上 or SPY/QQQ勝率が25pt以上低下→悪化 ／ 平均trade<10 or 有効フォールド<半数→サンプル不足 ／ "
+               "その他→変化なし。PIT（各フォールド当日情報のみ）。⚠️ **検証専用・本番スコア未反映。**")
 
 
 def _mini_metrics(m, title):

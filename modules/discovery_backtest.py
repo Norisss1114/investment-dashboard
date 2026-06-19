@@ -496,9 +496,9 @@ def _bench_window_return(bclose, i0, i1, rt):
     return None
 
 
-def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
-    """重み固定のまま履歴を連続する n_folds 個のOOS窓に分割し、各窓の成績を出す。
-    ※学習(重み再フィット)は行わない＝ローリングのアウトオブサンプル評価。"""
+def _wf_prepare(params, n_folds=None, test_months=None, progress_cb=None):
+    """walk_forward / compare_improvement_walk_forward 共通の準備：
+    データ取得・整列・theme_fit・bench・フォールド分割。返り値 dict（ok=False で理由）。"""
     n_folds = int(n_folds or getattr(config, "WF_DEFAULT_FOLDS", 4))
     test_months = int(test_months or getattr(config, "WF_DEFAULT_TEST_MONTHS", 3))
     dv = _derive_params(params)
@@ -506,7 +506,6 @@ def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
     test_bars = test_months * 21
     total_bars = 210 + n_folds * test_bars + hold + 12
 
-    # データ取得（run_backtest と同じ手順）
     tickers, sources, meta = universe.build_universe(params["universe_mode"], params.get("watchlist", ()))
     tickers = tickers[:config.BACKTEST_MAX_TICKERS]
     data, fail = {}, []
@@ -551,21 +550,33 @@ def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
         except Exception:
             bench[b] = None
 
-    # 評価可能区間を n_folds 個の連続窓に分割
     last = L - hold - 2
     first = max(210, last - n_folds * test_bars + 1)
     span = last - first + 1
     if span < n_folds * 5:
         return {"ok": False, "reason": "履歴が短くフォールドを作れません", "fail": fail}
     fold_size = span // n_folds
-
-    folds = []
+    fold_ranges = []
     for kf in range(n_folds):
         seg0 = first + kf * fold_size
         seg1 = (first + (kf + 1) * fold_size - 1) if kf < n_folds - 1 else last
+        fold_ranges.append((seg0, seg1))
+
+    return {"ok": True, "data": data, "common": common, "L": L, "theme_fit": theme_fit,
+            "bench": bench, "dv": dv, "rt": rt, "n_folds": n_folds, "test_months": test_months,
+            "fold_ranges": fold_ranges, "fail": fail}
+
+
+def _wf_evaluate(prep, post_filter=None, progress_cb=None):
+    """準備済みデータ上で各フォールドを評価。post_filter=None なら従来と同一出力。"""
+    data = prep["data"]; common = prep["common"]; L = prep["L"]; theme_fit = prep["theme_fit"]
+    bench = prep["bench"]; dv = prep["dv"]; rt = prep["rt"]; n_folds = prep["n_folds"]
+    folds = []
+    for kf, (seg0, seg1) in enumerate(prep["fold_ranges"]):
         test_idx = list(range(seg0, seg1 + 1, config.BACKTEST_SAMPLE_EVERY))
         trades, random_trades = _eval_window(data, common, L, test_idx, theme_fit, dv,
-                                             progress_cb, phase=f"フォールド{kf+1}/{n_folds}")
+                                             progress_cb, phase=f"フォールド{kf+1}/{n_folds}",
+                                             post_filter=post_filter)
         pnls = [t["pnl_pct"] for t in trades]
         m = _metrics(pnls)
         _, _, max_dd, total_ret = _equity_and_dd(sorted(trades, key=lambda x: x["date"])) if trades else ([], [], 0.0, 0.0)
@@ -584,7 +595,6 @@ def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
             "spy": spy_ret, "qqq": qqq_ret, "random": round(rand_total, 1),
         })
 
-    # 集計
     def _avg(key):
         vals = [f[key] for f in folds if f.get(key) is not None]
         return round(float(np.mean(vals)), 1) if vals else None
@@ -594,7 +604,7 @@ def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
         return (round(sum(1 for v in vals if v > 0) / len(vals) * 100)) if vals else None
 
     summary = {
-        "n_folds": n_folds, "test_months": test_months,
+        "n_folds": n_folds, "test_months": prep["test_months"],
         "avg_oos_return": _avg("oos_return"), "avg_win_rate": _avg("win_rate"),
         "avg_sharpe": _avg("sharpe"), "avg_max_dd": _avg("max_dd"),
         "worst_max_dd": round(min((f["max_dd"] for f in folds), default=0.0), 1),
@@ -603,7 +613,73 @@ def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
         "beat_random_pct": _beat_rate("vs_random"),
         "positive_folds_pct": round(sum(1 for f in folds if f["oos_return"] > 0) / len(folds) * 100) if folds else 0,
     }
-    return {"ok": True, "folds": folds, "summary": summary, "fail": fail, "params": params}
+    return {"folds": folds, "summary": summary}
+
+
+def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
+    """重み固定のまま履歴を連続する n_folds 個のOOS窓に分割し、各窓の成績を出す。
+    ※学習(重み再フィット)は行わない＝ローリングのアウトオブサンプル評価。"""
+    prep = _wf_prepare(params, n_folds, test_months, progress_cb)
+    if not prep.get("ok"):
+        return prep
+    ev = _wf_evaluate(prep, post_filter=None, progress_cb=progress_cb)
+    return {"ok": True, "folds": ev["folds"], "summary": ev["summary"],
+            "fail": prep["fail"], "params": params}
+
+
+def _wf_avg_trades(folds):
+    return round(sum(f["trades"] for f in folds) / len(folds), 1) if folds else 0.0
+
+
+def _wf_valid_folds(folds):
+    return sum(1 for f in folds if f["trades"] > 0)
+
+
+def _wf_verdict(base_sum, base_tc, var_sum, var_tc, var_valid, n_folds):
+    """WF改善/悪化/変化なし/サンプル不足。"""
+    if var_tc < 10 or var_valid < n_folds / 2.0:
+        return "サンプル不足"
+    ab, av = base_sum.get("avg_oos_return"), var_sum.get("avg_oos_return")
+    if ab is None or av is None:
+        return "サンプル不足"
+    dr = av - ab
+    pf_ok = (var_sum.get("positive_folds_pct", 0) or 0) >= (base_sum.get("positive_folds_pct", 0) or 0)
+    if dr >= 3 and pf_ok and var_tc >= max(1.0, base_tc * 0.3):
+        return "改善"
+    bs_drop = (base_sum.get("beat_spy_pct") is not None and var_sum.get("beat_spy_pct") is not None
+               and (base_sum["beat_spy_pct"] - var_sum["beat_spy_pct"]) >= 25)
+    bq_drop = (base_sum.get("beat_qqq_pct") is not None and var_sum.get("beat_qqq_pct") is not None
+               and (base_sum["beat_qqq_pct"] - var_sum["beat_qqq_pct"]) >= 25)
+    if dr <= -3 or bs_drop or bq_drop:
+        return "悪化"
+    return "変化なし"
+
+
+def compare_improvement_walk_forward(params, filters=None, n_folds=None, test_months=None, progress_cb=None):
+    """通常WF vs フィルター適用WF を同一データ・同一フォールドで比較（検証専用・本番非変更）。"""
+    filters = filters if filters is not None else IMPROVEMENT_FILTERS
+    prep = _wf_prepare(params, n_folds, test_months, progress_cb)
+    if not prep.get("ok"):
+        return prep
+    base_ev = _wf_evaluate(prep, post_filter=None, progress_cb=progress_cb)
+    base_sum = base_ev["summary"]
+    base_tc = _wf_avg_trades(base_ev["folds"])
+
+    variants = []
+    for name, spec in filters:
+        ev = _wf_evaluate(prep, post_filter=spec, progress_cb=progress_cb)
+        sm = ev["summary"]
+        avg_tc = _wf_avg_trades(ev["folds"])
+        valid = _wf_valid_folds(ev["folds"])
+        variants.append({
+            "name": name, "filter": spec, "summary": sm,
+            "avg_trade_count": avg_tc, "valid_folds": valid,
+            "verdict": _wf_verdict(base_sum, base_tc, sm, avg_tc, valid, prep["n_folds"]),
+        })
+
+    return {"ok": True, "baseline": {"summary": base_sum, "avg_trade_count": base_tc,
+                                     "valid_folds": _wf_valid_folds(base_ev["folds"])},
+            "variants": variants, "n_folds": prep["n_folds"], "fail": prep["fail"], "params": params}
 
 
 # ---------------- 集計・比較・提案 ----------------
