@@ -240,6 +240,53 @@ def _attach_vs_benchmarks(items, excluded):
             it["vs_qqq"] = round((r - qqq) * 100, 1)
 
 
+# v19.2: テーマ→代表セクターETF（具体的セクターを優先。先頭ルールほど優先）
+_SECTOR_ETF_RULES = [
+    (("半導体", "AI半導体", "通信半導体", "ファウンドリ", "製造装置", "メモリ"), "SMH"),
+    (("原子力", "ウラン"), "URA"),
+    (("防衛", "地政学ヘッジ"), "ITA"),
+    (("エネルギー", "原油ヘッジ"), "XLE"),
+    (("公益", "電力", "発電設備", "AI電力"), "XLU"),
+    (("ヘルスケア",), "XLV"),
+    (("金融", "銀行"), "XLF"),
+    (("小型株ETF", "小型株"), "IWM"),
+    (("AI", "ソフトウェア", "データセンター", "インフラ"), "QQQ"),
+]
+
+
+def _etf_for(themes):
+    """テーマ群から代表セクターETFを決定（具体的セクター優先）。該当なしは None。"""
+    ts = themes or []
+    for keys, etf in _SECTOR_ETF_RULES:
+        if any(t in keys for t in ts):
+            return etf
+    return None
+
+
+def _attach_vs_sector_etf(items, excluded):
+    """各 item に vs セクターETF（60日超過リターン, %ポイント）を付与。表示のみ。
+    QQQ/SPY 割当は vs SPY/QQQ と重複するため出さない。mock/失敗/None は非表示。"""
+    memo = {}
+
+    def etf_ret(sym):
+        if sym not in memo:
+            memo[sym] = _bench_ret60(sym)
+        return memo[sym]
+
+    for it in list(items) + list(excluded):
+        etf = _etf_for(it.get("themes"))
+        if not etf or etf in ("QQQ", "SPY"):  # 重複回避
+            continue
+        r = it.get("ret60")
+        if r is None:
+            continue
+        er = etf_ret(etf)
+        if er is None:  # mock/失敗 → 非表示
+            continue
+        it["etf"] = etf
+        it["vs_etf"] = round((r - er) * 100, 1)
+
+
 def sector_rotation(pass1):
     agg = {}
     for p in pass1:
@@ -460,6 +507,7 @@ def scan(scope, universe_mode, analysis_mode, market_score, market_mode="中立"
     strat = strat_mod.resolved()
     top20, excluded, rotation = _finalize(results, sources, strat)
     _attach_vs_benchmarks(top20, excluded)  # v19.1: SPY/QQQ実比較（scan内で1回・表示のみ）
+    _attach_vs_sector_etf(top20, excluded)  # v19.2: セクターETF実比較（表示のみ）
     end = dt.datetime.now(); dur = round(time.time() - t0, 1)
 
     stats = {"loaded": total, "found": total, "capped": False, "cap": config.SCAN_MODES.get(universe_mode, 0),

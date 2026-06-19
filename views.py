@@ -1397,10 +1397,12 @@ def _leader_badge(it):
 
 
 def _vs_line(it):
-    """v19.1: vs SPY / vs QQQ（60日超過リターン）の色付きHTML（あるものだけ・無ければ空）。"""
+    """v19.1/19.2: vs SPY / vs QQQ / vs セクターETF（60日超過リターン）の色付きHTML（あるものだけ）。"""
     parts = []
-    for label, key in [("vs SPY", "vs_spy"), ("vs QQQ", "vs_qqq")]:
-        v = it.get(key)
+    pairs = [("vs SPY", it.get("vs_spy")), ("vs QQQ", it.get("vs_qqq"))]
+    if it.get("vs_etf") is not None and it.get("etf"):
+        pairs.append((f'vs {it["etf"]}', it.get("vs_etf")))
+    for label, v in pairs:
         if v is None:
             continue
         c = "#16a34a" if v >= 0 else "#dc2626"
@@ -1511,6 +1513,8 @@ def _render_discovery_result(disc, regime):
                 "相対強度上位%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
                 "vsSPY%": (it.get("vs_spy") if it.get("vs_spy") is not None else "—"),
                 "vsQQQ%": (it.get("vs_qqq") if it.get("vs_qqq") is not None else "—"),
+                "vsセクターETF": (f'{it["etf"]} {it["vs_etf"]:+.1f}%'
+                               if it.get("vs_etf") is not None and it.get("etf") else "—"),
                 "リーダー": it.get("leader") or "—",
                 "発見元": "/".join(it["sources"][:3]), "現在値": it["price"], "スコア": it["score"],
                 "判定": it["verdict"], "信頼度": it["confidence"], "アクション": it["action"],
