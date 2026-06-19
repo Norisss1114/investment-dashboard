@@ -16,6 +16,7 @@ from modules import goal_plan as gp_mod
 from modules import scenario as scen_mod
 from modules import sec_edgar as sec_mod
 from modules import news_calibration as ncal_mod
+from modules import news_adoption as nadopt_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -582,6 +583,62 @@ def _render_news_calibration_analytics():
                 for ns in rec["next_steps"]:
                     st.markdown(f"- {ns}")
         st.caption("※集計・提案は参考表示です。**ニューススコア・発掘スコア・ランキングには一切反映していません。**")
+
+        # 📌 v27.2: 検証候補として保存（本番非反映）
+        _render_news_adoption()
+
+
+_NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
+
+
+def _render_news_adoption():
+    """v27.2: ニュース較正提案を検証候補として保存・承認・却下・削除（本番非反映）。"""
+    st.divider()
+    if st.button("📌 較正提案を検証候補に保存", key="nadopt_save", width='stretch'):
+        total, created, updated = nadopt_mod.save_candidates()
+        if total == 0:
+            st.info("保存できる有効候補（n≥3）がありませんでした。")
+        else:
+            st.success(f"検証候補 {total} 件を保存しました（新規 {created} / 更新 {updated}）。"
+                       "※本番スコアには反映しません。")
+
+    cands = nadopt_mod.list_all()
+    with st.expander(f"📋 ニュース採用候補（{len(cands)}件・検証用の控え／本番非反映）", expanded=bool(cands)):
+        if not cands:
+            st.caption("まだ候補はありません。上の「📌 較正提案を検証候補に保存」で保存できます。")
+            return
+
+        def _f(v):
+            return (f"{v:+.1f}%" if isinstance(v, (int, float)) else "—")
+
+        order = {"candidate": 0, "approved": 1, "rejected": 2}
+        for c in sorted(cands, key=lambda x: (order.get(x.get("status"), 9), x.get("type", ""), x.get("label", ""))):
+            ev = c.get("evidence", {}) or {}
+            color = _NADOPT_STATUS_COLOR.get(c.get("status"), "#64748b")
+            cs = c.get("current_score")
+            st.markdown(
+                f'<div style="font-size:0.95rem;">'
+                f'<b>[{c.get("type")}]</b> {c.get("label")} '
+                f'— {c.get("suggestion")}'
+                + (f'（現score {cs}）' if cs is not None else "")
+                + f'　<b style="color:{color};">{c.get("status")}</b></div>',
+                unsafe_allow_html=True)
+            st.caption(
+                f'ret7 {_f(ev.get("avg_ret7"))} / ret30 {_f(ev.get("avg_ret30"))} / '
+                f'vsSPY30 {_f(ev.get("avg_vs_spy30"))} / '
+                f'勝率 {ev.get("win_rate") if ev.get("win_rate") is not None else "—"}% / '
+                f'n={ev.get("sample_size")} ｜ 信頼度 {c.get("confidence","—")} ｜ '
+                f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
+            b = st.columns(3)
+            if b[0].button("✅ 承認", key=f'nadopt_app_{c["id"]}', width='stretch'):
+                nadopt_mod.approve(c["id"]); st.rerun()
+            if b[1].button("🚫 却下", key=f'nadopt_rej_{c["id"]}', width='stretch'):
+                nadopt_mod.reject(c["id"]); st.rerun()
+            if b[2].button("🗑 削除", key=f'nadopt_del_{c["id"]}', width='stretch'):
+                nadopt_mod.remove(c["id"]); st.rerun()
+            st.markdown("---")
+        st.caption("※承認/却下は status を変えるだけの控えです。"
+                   "**ニューススコア・発掘スコア・ランキングには一切反映しません。**")
 
 
 # ============================================================ 個別銘柄分析
