@@ -24,6 +24,9 @@ def get_secret(name: str, default: str = "") -> str:
     return default
 
 
+# v26: SEC EDGAR の User-Agent 既定（連絡先は SEC_USER_AGENT で設定推奨・メールはハードコードしない）
+SEC_USER_AGENT_DEFAULT = "investment-dashboard educational research (set SEC_USER_AGENT)"
+
 APP_TITLE = "中期投資 判断コックピット v2（教育・分析用）"
 # v14.5: スマホ向けの短縮タイトル
 APP_TITLE_SHORT = "投資コックピット"

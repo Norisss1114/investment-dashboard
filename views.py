@@ -14,6 +14,7 @@ from modules import holding_monitor as hm_mod
 from modules import data_fetch as data_fetch_mod
 from modules import goal_plan as gp_mod
 from modules import scenario as scen_mod
+from modules import sec_edgar as sec_mod
 
 
 def _action_chip(act: dict) -> str:
@@ -377,6 +378,65 @@ def _render_scenario_forecast(r, ticker, f, psrc, positions=None):
                "到達確率はタッチ確率でなく終端確率ベースの簡易推定。投資助言ではありません。発注前にMoomooで確認を。")
 
 
+def _fmt_big(v):
+    return f"${v:,.0f}" if isinstance(v, (int, float)) else "—"
+
+
+def _fmt_pct(v):
+    return f"{v*100:+.1f}%" if isinstance(v, (int, float)) else "—"
+
+
+def _render_sec_edgar(ticker, fund):
+    """v26: SEC EDGAR 公式ファンダ（参考表示のみ・ボタン実行・スコア非使用）。"""
+    with st.expander("🏛 SEC公式ファンダ（SEC EDGAR・参考表示／スコア未使用）", expanded=False):
+        ua, ua_set = sec_mod.user_agent()
+        if not ua_set:
+            st.warning("SEC_USER_AGENT未設定です。Streamlit Secrets / 環境変数 / .env に連絡先付きで設定してください"
+                       "（既定UAで動作中・SECにブロックされる場合があります）。")
+        key = f"sec_{ticker}"
+        if st.button("🏛 SEC公式ファンダを取得", key=f"sec_btn_{ticker}", width='stretch'):
+            with st.spinner("SEC EDGAR から取得中…"):
+                st.session_state[key] = sec_mod.get_fundamentals(ticker)
+        e = st.session_state.get(key)
+        if e is None:
+            st.caption("ボタンを押すと SEC 公式データを取得します（自動取得しません）。")
+            return
+        if not e.get("ok"):
+            st.info("SECデータ未取得（" + e.get("reason", "") + "）。")
+            return
+        c = st.columns(3)
+        c[0].metric("最新売上", _fmt_big(e.get("revenue")))
+        c[1].metric("純利益", _fmt_big(e.get("net_income")))
+        c[2].metric("EPS", f'{e["eps"]:.2f}' if isinstance(e.get("eps"), (int, float)) else "—")
+        c2 = st.columns(3)
+        c2[0].metric("粗利益", _fmt_big(e.get("gross_profit")))
+        c2[1].metric("営業利益", _fmt_big(e.get("operating_income")))
+        c2[2].metric("営業CF", _fmt_big(e.get("operating_cash_flow")))
+        c3 = st.columns(3)
+        c3[0].metric("総資産", _fmt_big(e.get("assets")))
+        c3[1].metric("負債", _fmt_big(e.get("liabilities")))
+        c3[2].metric("株主資本", _fmt_big(e.get("equity")))
+        c4 = st.columns(5)
+        c4[0].metric("売上成長", _fmt_pct(e.get("rev_growth")))
+        c4[1].metric("EPS成長", _fmt_pct(e.get("eps_growth")))
+        c4[2].metric("利益率", _fmt_pct(e.get("margin")))
+        c4[3].metric("ROE", _fmt_pct(e.get("roe")))
+        c4[4].metric("負債比率", _fmt_pct(e.get("debt_ratio")))
+        fresh = e.get("freshness_days")
+        st.caption(f"📅 filing date: {e.get('filing_date','—')}（FY{e.get('fiscal_year','—')} {e.get('fiscal_period','—')}）"
+                   + (f"・データ鮮度 {fresh}日前" if isinstance(fresh, int) else "") + f"・CIK {e.get('cik','—')}")
+
+        # yfinance との差分
+        cmp = sec_mod.compare_with_yfinance(fund, e)
+        st.markdown("**yfinance との差分（ポイント%）**")
+        rows = [{"指標": v["label"],
+                 "yfinance": (f'{v["yf"]*100:+.1f}%' if isinstance(v["yf"], (int, float)) else "—"),
+                 "SEC": (f'{v["edgar"]*100:+.1f}%' if isinstance(v["edgar"], (int, float)) else "—"),
+                 "差(pp)": (v["diff_pp"] if v["diff_pp"] is not None else "—")} for v in cmp.values()]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+        st.caption("※SEC EDGAR 公式（直近年次）。**スコア計算には使用していません（参考表示）。** 値の単位・期は会社により異なります。")
+
+
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):
     st.header("🔎 個別銘柄分析")
@@ -420,6 +480,7 @@ def render_stock(rmap, watch=None, positions=None):
         st.line_chart(r["df"]["Close"]); st.caption("（plotly未導入のため簡易表示）")
 
     _render_scenario_forecast(r, sel, f, psrc, positions)
+    _render_sec_edgar(sel, f)
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
