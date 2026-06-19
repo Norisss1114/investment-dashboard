@@ -1278,6 +1278,7 @@ def render_reflection():
 # ================================================================== v7: 銘柄発掘（高速・安定）
 from modules import discovery as disc_mod
 from modules import discovery_tracking as track_mod
+from modules import discovery_adoption as adopt_mod
 from modules import storage as storage_mod
 
 
@@ -2156,6 +2157,8 @@ def _render_bt_improvement(watchlist):
         _render_bt_improvement_single(watchlist)
     else:
         _render_bt_improvement_wf(watchlist)
+    # 採用候補（モード共通・常に表示）
+    _render_adoption_candidates()
 
 
 def _render_bt_improvement_single(watchlist):
@@ -2174,22 +2177,26 @@ def _render_bt_improvement_single(watchlist):
         chosen = st.multiselect("検証する改善フィルター", names, default=names, key="imp_filters")
         submitted = st.form_submit_button("🧪 改善案を検証", width='stretch')
 
-    if not submitted:
+    if submitted:
+        params = {"universe_mode": universe_mode, "period": period, "hold": hold, "entry": entry,
+                  "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
+                  "watchlist": tuple(watchlist)}
+        filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
+        cb, prog, status = _wf_progress()
+        r = bt_mod2.compare_improvement(params, filters=filters, progress_cb=cb)
+        prog.progress(1.0)
+        if not r.get("ok"):
+            status.write("⚠️ " + r.get("reason", "失敗"))
+            st.session_state.pop("imp_bt_result", None)
+            st.error("検証を生成できませんでした: " + r.get("reason", ""))
+            return
+        status.write("✅ 完了")
+        st.session_state["imp_bt_result"] = r
+
+    r = st.session_state.get("imp_bt_result")
+    if not r:
         st.info("フィルターを選んで「🧪 改善案を検証」を押してください（検証専用・ボタン実行）。")
         return
-
-    params = {"universe_mode": universe_mode, "period": period, "hold": hold, "entry": entry,
-              "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
-              "watchlist": tuple(watchlist)}
-    filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
-    cb, prog, status = _wf_progress()
-    r = bt_mod2.compare_improvement(params, filters=filters, progress_cb=cb)
-    prog.progress(1.0)
-    if not r.get("ok"):
-        status.write("⚠️ " + r.get("reason", "失敗"))
-        st.error("検証を生成できませんでした: " + r.get("reason", ""))
-        return
-    status.write("✅ 完了")
 
     b = r["baseline"]
     st.subheader("📊 通常バックテスト（ベースライン）")
@@ -2229,6 +2236,18 @@ def _render_bt_improvement_single(watchlist):
                "その他→変化なし ／ トレード数<10→サンプル不足。PIT（当日情報のみ）で検証。"
                "⚠️ **これは検証専用であり、本番スコアには反映していません。**")
 
+    # 採用候補に保存（ゲート通過分のみ）
+    savable = [v for v in r["variants"] if adopt_mod.bt_savable(v, b)]
+    if savable:
+        st.markdown("**📌 採用候補に保存（改善＆条件クリア分のみ）**")
+        for v in savable:
+            cc = st.columns([3, 1])
+            cc[0].caption(f'{v["name"]}：total_return {v["total_return"]:+.1f}%（ベース比 '
+                          f'{v["total_return"]-b["total_return"]:+.1f}）・trade {v["trade_count"]}')
+            if cc[1].button("📌 保存", key=f"save_bt_{v['name']}", width='stretch'):
+                ok, msg = adopt_mod.add_from_bt(v, b)
+                (st.success if ok else st.info)(msg)
+
 
 def _render_bt_improvement_wf(watchlist):
     st.caption("改善フィルターを**ウォークフォワード（連続OOS）**でも検証します（通常WF vs フィルターWF）。"
@@ -2252,23 +2271,27 @@ def _render_bt_improvement_wf(watchlist):
         chosen = st.multiselect("検証する改善フィルター", names, default=names, key="impwf_filters")
         submitted = st.form_submit_button("🚶 ウォークフォワードで検証", width='stretch')
 
-    if not submitted:
+    if submitted:
+        params = {"universe_mode": universe_mode, "period": list(config.BACKTEST_PERIODS)[0], "hold": hold,
+                  "entry": entry, "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
+                  "watchlist": tuple(watchlist)}
+        filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
+        cb, prog, status = _wf_progress()
+        r = bt_mod2.compare_improvement_walk_forward(params, filters=filters, n_folds=n_folds,
+                                                     test_months=test_months, progress_cb=cb)
+        prog.progress(1.0)
+        if not r.get("ok"):
+            status.write("⚠️ " + r.get("reason", "失敗"))
+            st.session_state.pop("imp_wf_result", None)
+            st.error("検証を生成できませんでした: " + r.get("reason", ""))
+            return
+        status.write("✅ 完了")
+        st.session_state["imp_wf_result"] = r
+
+    r = st.session_state.get("imp_wf_result")
+    if not r:
         st.info("フィルターを選んで「🚶 ウォークフォワードで検証」を押してください（検証専用・ボタン実行）。")
         return
-
-    params = {"universe_mode": universe_mode, "period": list(config.BACKTEST_PERIODS)[0], "hold": hold,
-              "entry": entry, "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
-              "watchlist": tuple(watchlist)}
-    filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
-    cb, prog, status = _wf_progress()
-    r = bt_mod2.compare_improvement_walk_forward(params, filters=filters, n_folds=n_folds,
-                                                 test_months=test_months, progress_cb=cb)
-    prog.progress(1.0)
-    if not r.get("ok"):
-        status.write("⚠️ " + r.get("reason", "失敗"))
-        st.error("検証を生成できませんでした: " + r.get("reason", ""))
-        return
-    status.write("✅ 完了")
 
     bs = r["baseline"]["summary"]
     st.subheader("📊 通常ウォークフォワード（ベースライン）")
@@ -2303,6 +2326,60 @@ def _render_bt_improvement_wf(watchlist):
     st.caption("判定: 平均OOSがベースライン+3%以上かつプラスFolds率が同等以上かつ平均trade≥30%→改善 ／ "
                "平均OOS−3%以上 or SPY/QQQ勝率が25pt以上低下→悪化 ／ 平均trade<10 or 有効フォールド<半数→サンプル不足 ／ "
                "その他→変化なし。PIT（各フォールド当日情報のみ）。⚠️ **検証専用・本番スコア未反映。**")
+
+    # 採用候補に保存（ゲート通過分のみ）
+    base = r["baseline"]
+    savable = [v for v in r["variants"] if adopt_mod.wf_savable(v, base)]
+    if savable:
+        st.markdown("**📌 採用候補に保存（改善＆条件クリア分のみ）**")
+        for v in savable:
+            s = v["summary"]
+            cc = st.columns([3, 1])
+            cc[0].caption(f'{v["name"]}：平均OOS {s["avg_oos_return"]:+.1f}%（ベース比 '
+                          f'{s["avg_oos_return"]-base["summary"]["avg_oos_return"]:+.1f}）・平均trade {v["avg_trade_count"]:.0f}')
+            if cc[1].button("📌 保存", key=f"save_wf_{v['name']}", width='stretch'):
+                ok, msg = adopt_mod.add_from_wf(v, base)
+                (st.success if ok else st.info)(msg)
+
+
+_ADOPT_STATUS_COLOR = {"candidate": "#0ea5e9", "approved": "#16a34a", "rejected": "#dc2626"}
+
+
+def _render_adoption_candidates():
+    st.divider()
+    st.subheader("📋 採用候補")
+    st.caption("⚠️ ここは人間の確認用の控えです。承認しても**本番スコア・発掘ランキングには反映しません**（statusが変わるだけ）。")
+    recs = adopt_mod.list_all()
+    if not recs:
+        st.info("採用候補はまだありません。上の検証結果で「📌 採用候補に保存」を押すと追加されます。")
+        return
+    if st.button("🗑 採用候補を全クリア", key="adopt_clear"):
+        adopt_mod.clear()
+        st.success("採用候補をクリアしました。")
+        recs = adopt_mod.list_all()
+    for r in recs:
+        sc = _ADOPT_STATUS_COLOR.get(r.get("status"), "#64748b")
+        bt_imp = (r.get("bt") or {}).get("improvement")
+        wf_imp = (r.get("wf") or {}).get("improvement")
+        with st.container(border=True):
+            st.markdown(
+                f'<b>{r["filter_label"]}</b>　<span style="font-size:0.78rem;color:#64748b;">{r["id"]}</span>　'
+                f'<span style="background:#eef;border-radius:6px;padding:1px 7px;font-size:0.72rem;">{r["source"]}</span>　'
+                f'<span style="background:{sc};color:white;border-radius:6px;padding:1px 7px;font-size:0.72rem;">{r["status"]}</span>',
+                unsafe_allow_html=True)
+            bits = []
+            if bt_imp is not None:
+                bits.append(f'BT改善 {bt_imp:+.1f}%・trade {(r["bt"].get("candidate") or {}).get("trade_count","—")}')
+            if wf_imp is not None:
+                bits.append(f'WF改善 {wf_imp:+.1f}%・平均trade {r["wf"].get("avg_trade_count","—")}')
+            st.caption("　/　".join(bits) + f'　｜作成 {r["created_at"][:16].replace("T"," ")}・更新 {r["updated_at"][:16].replace("T"," ")}')
+            a = st.columns(3)
+            if a[0].button("✅ 承認", key=f"adopt_ap_{r['id']}", width='stretch'):
+                adopt_mod.approve(r["id"]); st.rerun()
+            if a[1].button("🚫 却下", key=f"adopt_rj_{r['id']}", width='stretch'):
+                adopt_mod.reject(r["id"]); st.rerun()
+            if a[2].button("🗑 削除", key=f"adopt_rm_{r['id']}", width='stretch'):
+                adopt_mod.remove(r["id"]); st.rerun()
 
 
 def _mini_metrics(m, title):
