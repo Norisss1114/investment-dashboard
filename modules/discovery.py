@@ -120,6 +120,96 @@ def _action(verdict, snap):
     return "見送り"
 
 
+# ============================ v19: 相対順位（外部取得なし） ============================
+def _ret60(df):
+    """過去60営業日リターン。データ不足(61本未満)なら None。"""
+    try:
+        c = df["Close"].dropna()
+        if len(c) >= 61:
+            return float(c.iloc[-1] / c.iloc[-61] - 1)
+    except Exception:
+        pass
+    return None
+
+
+def _top_pct(rank, total):
+    """上位パーセンタイル（1始まり順位→上位X%）。"""
+    if not total:
+        return None
+    return max(1, int(round(rank / total * 100)))
+
+
+def _attach_rankings(items, excluded, pool):
+    """スキャン母集団 pool から セクター順位 / 市場パーセンタイル / 相対強度 / リーダー判定 を
+    各 item に付与し、発掘理由を拡充する（外部取得なし・後処理のみ）。
+    pool: [{ticker, sector, score, ret60, eps_g, rev_g, vol_ratio, news_impact}]"""
+    n = len(pool)
+    # 市場パーセンタイル（score 降順）
+    score_rank = {p["ticker"]: i + 1 for i, p in enumerate(sorted(pool, key=lambda x: -x["score"]))}
+    # 相対強度（60日リターン降順・取得できたものだけ）
+    rs_pool = [p for p in pool if p.get("ret60") is not None]
+    rs_rank = {p["ticker"]: i + 1 for i, p in enumerate(sorted(rs_pool, key=lambda x: -x["ret60"]))}
+    n_rs = len(rs_pool)
+    # セクター順位
+    sectors = {}
+    for p in pool:
+        sectors.setdefault(p["sector"], []).append(p)
+    sec_rank, sec_count = {}, {}
+    for sec, lst in sectors.items():
+        for i, p in enumerate(sorted(lst, key=lambda x: -x["score"])):
+            sec_rank[p["ticker"]] = i + 1
+        for p in lst:
+            sec_count[p["ticker"]] = len(lst)
+    meta = {p["ticker"]: p for p in pool}
+
+    def attach(it):
+        t = it["ticker"]
+        it["market_pct"] = _top_pct(score_rank.get(t, n), n)
+        it["sector_rank"] = sec_rank.get(t)
+        it["sector_count"] = sec_count.get(t)
+        it["rs_pct"] = _top_pct(rs_rank[t], n_rs) if t in rs_rank else None
+        # リーダー判定（セクター内の相対位置）
+        sr, sc = it.get("sector_rank"), it.get("sector_count") or 1
+        if sr:
+            ratio = sr / sc
+            if sr == 1 or ratio <= 0.3:
+                it["leader"] = "リーダー"
+            elif ratio >= 0.7 or it.get("verdict") == "AVOID":
+                it["leader"] = "弱い"
+            else:
+                it["leader"] = "フォロワー"
+        else:
+            it["leader"] = None
+        # 発掘理由の拡充（条件に合うものだけ・重複回避）
+        m = meta.get(t, {})
+        extra = []
+        if it.get("sector_rank") and it["sector_rank"] <= 3:
+            extra.append(f"セクター{it['sector_rank']}位")
+        if it.get("market_pct") is not None and it["market_pct"] <= 10:
+            extra.append(f"市場上位{it['market_pct']}%")
+        if it.get("rs_pct") is not None and it["rs_pct"] <= 20:
+            extra.append(f"相対強度 上位{it['rs_pct']}%")
+        vr = m.get("vol_ratio") or 0
+        if vr >= 1.5:
+            extra.append(f"出来高急増(×{vr:.1f})")
+        eg = m.get("eps_g")
+        if eg is not None and eg >= 0.15:
+            extra.append(f"EPS成長(+{eg*100:.0f}%)")
+        rg = m.get("rev_g")
+        if rg is not None and rg >= 0.15:
+            extra.append(f"売上成長(+{rg*100:.0f}%)")
+        ni = m.get("news_impact") or 0
+        if ni >= 1.0 and not any(str(x).startswith("好材料") for x in it.get("reasons", [])):
+            extra.append(f"ニュース好感度(+{ni:.1f})")
+        reasons = it.setdefault("reasons", [])
+        for e in extra:
+            if e not in reasons:
+                reasons.append(e)
+
+    for it in list(items) + list(excluded):
+        attach(it)
+
+
 def sector_rotation(pass1):
     agg = {}
     for p in pass1:
@@ -235,6 +325,9 @@ def _finalize(results, sources, strat=None):
             "snap": snap, "ns": ns, "hits": _hit_conditions(r, df), "news_driver": _news_driver(r),
             "tech_state": _tech_state(snap), "confidence": conf, "conf_notes": conf_notes,
             "sources": sources.get(t, []), "screen_fail": screen_fail, "excl": excl, "earnings_days": e_days,
+            # v19: 相対順位用（外部取得なし）
+            "ret60": _ret60(df), "eps_g": fund.get("eps_g"), "rev_g": fund.get("rev_g"),
+            "vol_ratio": snap.get("vol_ratio"),
         })
 
     rotation = sector_rotation([p for p in pass1 if not (p["screen_fail"] or p["excl"])])
@@ -242,6 +335,7 @@ def _finalize(results, sources, strat=None):
     top5_secs = [x["sector"] for x in rotation[:5]]
 
     items, excluded = [], []
+    rank_pool = []  # v19: 順位計算の母集団（全pass1）
     for p in pass1:
         rot = 1.0 if p["sector"] in top3_secs else 0.6 if p["sector"] in top5_secs else 0.3
         theme_comp = round((0.7 * p["tfit"] + 0.3 * rot) * Wt["theme"], 1)
@@ -249,6 +343,9 @@ def _finalize(results, sources, strat=None):
         funda = round(p["fund_raw"] * Wt["fundamental"], 1); supply = round(p["supply_raw"] * Wt["supply"], 1)
         risk = round(p["risk_raw"] * Wt["risk"], 1)
         score = round(tech + news + funda + theme_comp + supply + risk, 1)
+        rank_pool.append({"ticker": p["ticker"], "sector": p["sector"], "score": score,
+                          "ret60": p.get("ret60"), "eps_g": p.get("eps_g"), "rev_g": p.get("rev_g"),
+                          "vol_ratio": p.get("vol_ratio"), "news_impact": p["ns"].get("avg_impact", 0)})
         verdict = ("強いBUY" if score >= config.DISCOVERY_BUY_STRONG else "BUY" if score >= config.DISCOVERY_BUY
                    else "WATCH" if score >= config.DISCOVERY_WATCH else "AVOID")
         if p["confidence"] == "低" and verdict in ("強いBUY", "BUY"):
@@ -281,6 +378,7 @@ def _finalize(results, sources, strat=None):
         else:
             item["excluded"] = False; items.append(item)
 
+    _attach_rankings(items, excluded, rank_pool)  # v19: 相対順位を付与＋理由拡充
     items.sort(key=lambda x: -x["score"]); excluded.sort(key=lambda x: -x["score"])
     return items[:20], excluded[:12], rotation
 

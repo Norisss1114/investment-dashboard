@@ -1383,6 +1383,31 @@ def render_discovery(regime, watchlist):
             st.dataframe(pd.DataFrame(log[-10:][::-1]), width='stretch', height=240)
 
 
+_LEADER_COLOR = {"リーダー": "#15803d", "フォロワー": "#0ea5e9", "弱い": "#dc2626"}
+
+
+def _leader_badge(it):
+    """v19: リーダー/フォロワー/弱い のバッジ（無ければ空文字・旧キャッシュ安全）。"""
+    ld = it.get("leader")
+    if not ld:
+        return ""
+    c = _LEADER_COLOR.get(ld, "#64748b")
+    return (f'<span style="background:{c};color:white;border-radius:6px;padding:1px 7px;'
+            f'font-size:0.72rem;font-weight:700;">{ld}</span>')
+
+
+def _disc_rank_line(it):
+    """v19: セクター順位・市場上位%・相対強度% を1行に（あるものだけ）。"""
+    parts = []
+    if it.get("sector_rank") and it.get("sector_count"):
+        parts.append(f'{it["sector"]} {it["sector_rank"]}位/{it["sector_count"]}')
+    if it.get("market_pct") is not None:
+        parts.append(f'市場上位{it["market_pct"]}%')
+    if it.get("rs_pct") is not None:
+        parts.append(f'相対強度 上位{it["rs_pct"]}%')
+    return "　".join(parts)
+
+
 def _render_discovery_result(disc, regime):
     stt = disc["stats"]
     s = st.columns(5)
@@ -1409,9 +1434,12 @@ def _render_discovery_result(disc, regime):
                     f'<div style="padding:14px;border-radius:14px;border:2px solid {c};background:{c}12;">'
                     f'<div style="font-size:1.4rem;font-weight:800;color:{c};">{it["ticker"]} '
                     f'<span style="font-size:0.85rem;color:#64748b;">{it["score"]}点 {it["verdict"]}・信頼{it["confidence"]}</span></div>'
-                    f'<div style="color:#475569;font-size:0.85rem;">{it["name"]}｜{it["sector"]}</div>'
+                    f'<div style="color:#475569;font-size:0.85rem;">{it["name"]}｜{it["sector"]} {_leader_badge(it)}</div>'
                     f'<div style="color:#64748b;font-size:0.75rem;">発見元: {", ".join(it["sources"][:4])}</div></div>',
                     unsafe_allow_html=True)
+                _rl = _disc_rank_line(it)
+                if _rl:
+                    st.caption("📊 " + _rl)
                 for rsn in it["reasons"]:
                     st.write("・" + rsn)
                 nd = it.get("news_driver")
@@ -1432,9 +1460,13 @@ def _render_discovery_result(disc, regime):
                 cc = st.columns([2.2, 1])
                 with cc[0]:
                     st.markdown(f'<div style="font-size:1.2rem;font-weight:800;">{it["ticker"]} '
-                                f'<span style="font-size:0.8rem;color:{vc};">{it["verdict"]}・信頼{it["confidence"]}</span></div>'
+                                f'<span style="font-size:0.8rem;color:{vc};">{it["verdict"]}・信頼{it["confidence"]}</span> '
+                                f'{_leader_badge(it)}</div>'
                                 f'<div style="color:#8a8a8e;font-size:0.8rem;">{it.get("name","")}｜{it["sector"]}｜{_stars(it["score"])}</div>',
                                 unsafe_allow_html=True)
+                    _rl = _disc_rank_line(it)
+                    if _rl:
+                        st.markdown(f'<span style="font-size:0.78rem;color:#64748b;">📊 {_rl}</span>', unsafe_allow_html=True)
                     if it.get("reasons"):
                         st.markdown("　".join(f'<span style="font-size:0.82rem;">・{r}</span>' for r in it["reasons"][:3]), unsafe_allow_html=True)
                     rp = it.get("risk_points") or []
@@ -1455,11 +1487,16 @@ def _render_discovery_result(disc, regime):
         with st.expander("📊 もっと見る（全TOP20 詳細テーブル）", expanded=False):
             rows = [{
                 "順位": i, "ティッカー": it["ticker"], "企業": it["name"], "セクター": it["sector"],
+                "セクター順位": (f'{it["sector_rank"]}/{it["sector_count"]}'
+                              if it.get("sector_rank") and it.get("sector_count") else "—"),
+                "市場上位%": (it.get("market_pct") if it.get("market_pct") is not None else "—"),
+                "相対強度上位%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
+                "リーダー": it.get("leader") or "—",
                 "発見元": "/".join(it["sources"][:3]), "現在値": it["price"], "スコア": it["score"],
                 "判定": it["verdict"], "信頼度": it["confidence"], "アクション": it["action"],
                 "ニュース影響": round(it["news_impact"], 1), "テクニカル": it["tech_state"],
                 "エントリー": it["entry"], "損切り": it["stop"], "利確1": it["tp1"], "利確2": it["tp2"],
-                "発掘理由": " / ".join(it["reasons"][:2]), "危険ポイント": " / ".join(it["risk_points"][:2]),
+                "発掘理由": " / ".join(it["reasons"][:3]), "危険ポイント": " / ".join(it["risk_points"][:2]),
             } for i, it in enumerate(top20, 1)]
             df = pd.DataFrame(rows)
             st.dataframe(
