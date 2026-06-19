@@ -112,6 +112,112 @@ def _simulate(d, entry_idx, hold, entry_price, take_rule, stop_rule):
     return ret * 100, end_idx - entry_idx, "期間終了"
 
 
+# ---------------- v20: 1検証窓の評価（run_backtest / walk_forward 共通） ----------------
+def _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb=None, phase="検証"):
+    """指定 test_idx（検証日インデックス群）でトレード＋ランダム比較を生成して返す。
+    ロジックは従来 run_backtest の内側ループと同一（出力不変）。dv=派生パラメータ。"""
+    Wt = dv["Wt"]; rsi_thr = dv["rsi_thr"]; vol_cond = dv["vol_cond"]; cond = dv["cond"]
+    entry_method = dv["entry_method"]; hold = dv["hold"]; take_rule = dv["take_rule"]
+    stop_rule = dv["stop_rule"]; rt_cost = dv["rt_cost"]
+    trades = []
+    rng = np.random.default_rng(42)
+    random_trades = []
+
+    for n_done, i in enumerate(test_idx, 1):
+        rets = {t: (data[t]["RET60"].iloc[i]) for t in data}
+        valid = [t for t in data if rets[t] == rets[t]]
+        if not valid:
+            continue
+        rser = pd.Series({t: rets[t] for t in valid}).rank(pct=True)
+        scored = []
+        for t in valid:
+            snap = _snap_at(data[t], i)
+            if snap.get("rsi", 50) >= rsi_thr:
+                continue
+            if vol_cond != "なし":
+                vol_i = float(data[t]["Volume"].iloc[i] or 0)
+                win = 20 if "20" in vol_cond else 50
+                vavg = float(data[t]["Volume"].iloc[max(0, i - win + 1):i + 1].mean() or 0)
+                if not (vavg > 0 and vol_i >= vavg):
+                    continue
+            tech = scoring._technical_raw(snap)[0]
+            supply = scoring._supply_raw(snap)[0]
+            rs = float(rser[t])
+            tfit = theme_fit[t][0]
+            score = tech * Wt["technical"] + rs * Wt["relative_strength"] + tfit * Wt["theme"] + supply * Wt["supply"]
+            verdict = "BUY" if score >= 70 else "WATCH" if score >= 55 else "AVOID"
+            scored.append((t, round(score, 1), verdict, snap))
+        scored.sort(key=lambda x: -x[1])
+        for rank, (t, sc, vd, snap) in enumerate(scored, 1):
+            scored[rank - 1] = (t, sc, vd, snap, rank)
+
+        def passes(item):
+            t, sc, vd, snap, rank = item
+            if cond == "BUY以上だけ":
+                return vd == "BUY"
+            if cond == "WATCH以上":
+                return vd in ("BUY", "WATCH")
+            if cond == "スコア上位TOP5":
+                return rank <= 5
+            if cond == "スコア上位TOP10":
+                return rank <= 10
+            return rank <= 20
+        picks = [it for it in scored if passes(it)][:config.BACKTEST_MAX_PICKS]
+
+        date = common[i]
+        for t, sc, vd, snap, rank in picks:
+            d = data[t]
+            if entry_method == "翌営業日始値":
+                e_idx = i + 1; e_price = float(d["Open"].iloc[e_idx])
+            elif entry_method == "翌営業日終値":
+                e_idx = i + 1; e_price = float(d["Close"].iloc[e_idx])
+            else:
+                e_idx = i; e_price = float(d["Close"].iloc[i])
+            if e_idx + 1 >= L or not (e_price > 0):
+                continue
+            pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
+            ex_idx = min(e_idx + days, L - 1)
+            pnl_net = pnl - rt_cost
+            trades.append({
+                "date": str(date.date()), "ticker": t, "score": sc, "verdict": vd, "rank": rank,
+                "entry": round(e_price, 2), "exit": round(e_price * (1 + pnl / 100), 2),
+                "pnl_gross": round(pnl, 2), "pnl_pct": round(pnl_net, 2), "days": days, "reason": why,
+                "sector": theme_fit[t][1], "theme": "/".join(theme_fit[t][2][:2]),
+                "exit_date": str(common[ex_idx].date()), "entry_rsi": round(float(snap.get("rsi", 50)), 0),
+            })
+        k = len(picks)
+        if k and valid:
+            rsel = rng.choice(valid, size=min(k, len(valid)), replace=False)
+            for t in rsel:
+                d = data[t]
+                e_idx = i + 1 if entry_method != "スコア算出日の終値" else i
+                if e_idx + 1 >= L:
+                    continue
+                e_price = float(d["Open"].iloc[e_idx]) if entry_method == "翌営業日始値" else float(d["Close"].iloc[e_idx])
+                if e_price <= 0:
+                    continue
+                pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
+                random_trades.append({"date": str(date.date()), "pnl_gross": round(pnl, 2),
+                                      "pnl_pct": round(pnl - rt_cost, 2), "days": days})
+        if progress_cb:
+            progress_cb(phase, n_done, len(test_idx), 0, str(date.date()))
+    return trades, random_trades
+
+
+def _derive_params(params):
+    """params から派生値（重み・しきい値・hold等）を1か所で算出。"""
+    Wt = config.WEIGHT_PRESETS.get(params.get("weights", "現在設定"), config.BACKTEST_WEIGHTS)
+    rsi_excl = params.get("rsi_exclude", "なし")
+    rsi_thr = 999
+    for thr in (70, 75, 80):
+        if str(thr) in rsi_excl:
+            rsi_thr = thr
+    return {"Wt": Wt, "rsi_thr": rsi_thr, "vol_cond": params.get("volume_cond", "なし"),
+            "cond": params["condition"], "entry_method": params["entry"],
+            "hold": config.BACKTEST_HOLD[params["hold"]], "take_rule": params["take"],
+            "stop_rule": params["stop"], "rt_cost": _round_trip_cost()}
+
+
 # ---------------- メイン ----------------
 def run_backtest(params, progress_cb=None):
     start_dt = dt.datetime.now(); t0 = time.time()
@@ -184,94 +290,11 @@ def run_backtest(params, progress_cb=None):
         except Exception:
             bench[b] = None
 
-    trades = []
-    rng = np.random.default_rng(42)
-    random_trades = []
-    rt_cost = _round_trip_cost()  # v18: 往復取引コスト(%)
-
-    for n_done, i in enumerate(test_idx, 1):
-        # PITスコア計算
-        rets = {t: (data[t]["RET60"].iloc[i]) for t in data}
-        valid = [t for t in data if rets[t] == rets[t]]
-        if not valid:
-            continue
-        rser = pd.Series({t: rets[t] for t in valid}).rank(pct=True)  # 0..1
-        scored = []
-        for t in valid:
-            snap = _snap_at(data[t], i)
-            # RSI除外
-            if snap.get("rsi", 50) >= rsi_thr:
-                continue
-            # 出来高条件
-            if vol_cond != "なし":
-                vol_i = float(data[t]["Volume"].iloc[i] or 0)
-                win = 20 if "20" in vol_cond else 50
-                vavg = float(data[t]["Volume"].iloc[max(0, i - win + 1):i + 1].mean() or 0)
-                if not (vavg > 0 and vol_i >= vavg):
-                    continue
-            tech = scoring._technical_raw(snap)[0]
-            supply = scoring._supply_raw(snap)[0]
-            rs = float(rser[t])
-            tfit = theme_fit[t][0]
-            score = tech * Wt["technical"] + rs * Wt["relative_strength"] + tfit * Wt["theme"] + supply * Wt["supply"]
-            verdict = "BUY" if score >= 70 else "WATCH" if score >= 55 else "AVOID"
-            scored.append((t, round(score, 1), verdict, snap))
-        scored.sort(key=lambda x: -x[1])
-        for rank, (t, sc, vd, snap) in enumerate(scored, 1):
-            scored[rank - 1] = (t, sc, vd, snap, rank)
-
-        # 採用条件
-        def passes(item):
-            t, sc, vd, snap, rank = item
-            if cond == "BUY以上だけ":
-                return vd == "BUY"
-            if cond == "WATCH以上":
-                return vd in ("BUY", "WATCH")
-            if cond == "スコア上位TOP5":
-                return rank <= 5
-            if cond == "スコア上位TOP10":
-                return rank <= 10
-            return rank <= 20
-        picks = [it for it in scored if passes(it)][:config.BACKTEST_MAX_PICKS]
-
-        date = common[i]
-        for t, sc, vd, snap, rank in picks:
-            d = data[t]
-            if entry_method == "翌営業日始値":
-                e_idx = i + 1; e_price = float(d["Open"].iloc[e_idx])
-            elif entry_method == "翌営業日終値":
-                e_idx = i + 1; e_price = float(d["Close"].iloc[e_idx])
-            else:
-                e_idx = i; e_price = float(d["Close"].iloc[i])
-            if e_idx + 1 >= L or not (e_price > 0):
-                continue
-            pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
-            ex_idx = min(e_idx + days, L - 1)
-            pnl_net = pnl - rt_cost  # v18: 往復コスト控除（pnl_pct はネット、pnl_gross はコスト前）
-            trades.append({
-                "date": str(date.date()), "ticker": t, "score": sc, "verdict": vd, "rank": rank,
-                "entry": round(e_price, 2), "exit": round(e_price * (1 + pnl / 100), 2),
-                "pnl_gross": round(pnl, 2), "pnl_pct": round(pnl_net, 2), "days": days, "reason": why,
-                "sector": theme_fit[t][1], "theme": "/".join(theme_fit[t][2][:2]),
-                "exit_date": str(common[ex_idx].date()), "entry_rsi": round(float(snap.get("rsi", 50)), 0),
-            })
-        # ランダム比較（同数）
-        k = len(picks)
-        if k and valid:
-            rsel = rng.choice(valid, size=min(k, len(valid)), replace=False)
-            for t in rsel:
-                d = data[t]
-                e_idx = i + 1 if entry_method != "スコア算出日の終値" else i
-                if e_idx + 1 >= L:
-                    continue
-                e_price = float(d["Open"].iloc[e_idx]) if entry_method == "翌営業日始値" else float(d["Close"].iloc[e_idx])
-                if e_price <= 0:
-                    continue
-                pnl, days, why = _simulate(d, e_idx, hold, e_price, take_rule, stop_rule)
-                random_trades.append({"date": str(date.date()), "pnl_gross": round(pnl, 2),
-                                      "pnl_pct": round(pnl - rt_cost, 2), "days": days})
-        if progress_cb:
-            progress_cb("検証", n_done, len(test_idx), 0, str(date.date()))
+    # v20: 内側ループは _eval_window に集約（出力は従来と同一）
+    dv = {"Wt": Wt, "rsi_thr": rsi_thr, "vol_cond": vol_cond, "cond": cond,
+          "entry_method": entry_method, "hold": hold, "take_rule": take_rule,
+          "stop_rule": stop_rule, "rt_cost": _round_trip_cost()}
+    trades, random_trades = _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb)
 
     if not trades:
         return {"ok": False, "reason": "トレードが生成されませんでした（条件が厳しすぎる可能性）", "fail": fail}
@@ -285,6 +308,128 @@ def run_backtest(params, progress_cb=None):
     save_cache(result)
     storage.save_csv(config.BACKTEST_TRADES_PATH, list(trades[0].keys()), trades)
     return result
+
+
+# ---------------- v20: ウォークフォワード検証（重み固定の連続OOS評価） ----------------
+def _bench_window_return(bclose, i0, i1, rt):
+    """ベンチ（買い持ち）の窓内リターン%（1往復コスト控除）。取れなければ None。"""
+    try:
+        a = float(bclose.iloc[i0]); b = float(bclose.iloc[i1])
+        if a > 0 and b > 0:
+            return round((b / a - 1) * 100 - rt, 1)
+    except Exception:
+        pass
+    return None
+
+
+def walk_forward(params, n_folds=None, test_months=None, progress_cb=None):
+    """重み固定のまま履歴を連続する n_folds 個のOOS窓に分割し、各窓の成績を出す。
+    ※学習(重み再フィット)は行わない＝ローリングのアウトオブサンプル評価。"""
+    n_folds = int(n_folds or getattr(config, "WF_DEFAULT_FOLDS", 4))
+    test_months = int(test_months or getattr(config, "WF_DEFAULT_TEST_MONTHS", 3))
+    dv = _derive_params(params)
+    hold = dv["hold"]; rt = dv["rt_cost"]
+    test_bars = test_months * 21
+    total_bars = 210 + n_folds * test_bars + hold + 12
+
+    # データ取得（run_backtest と同じ手順）
+    tickers, sources, meta = universe.build_universe(params["universe_mode"], params.get("watchlist", ()))
+    tickers = tickers[:config.BACKTEST_MAX_TICKERS]
+    data, fail = {}, []
+    for k, t in enumerate(tickers):
+        try:
+            d = _prep(_history(t, total_bars))
+            if len(d) >= 230:
+                data[t] = d
+            else:
+                fail.append(t)
+        except Exception:
+            fail.append(t)
+        if progress_cb:
+            progress_cb("データ取得", k + 1, len(tickers), len(fail), t)
+    if not data:
+        return {"ok": False, "reason": "有効データなし", "fail": fail}
+
+    common = None
+    for d in data.values():
+        common = d.index if common is None else common.intersection(d.index)
+    common = common.sort_values()
+    for t in list(data.keys()):
+        data[t] = data[t].reindex(common).dropna(subset=["Close"])
+    L = len(common)
+    if L < 230:
+        return {"ok": False, "reason": "履歴期間が不足（フォールド数や期間を減らしてください）", "fail": fail}
+
+    theme_fit = {}
+    for t in data:
+        th = themes_mod.classify(t)
+        wt = 0.0
+        for x in th:
+            for key, val in config.CURRENT_THEMES.items():
+                if key == x or key in x:
+                    wt = max(wt, val)
+        theme_fit[t] = (wt, th[0] if th else "未分類", th)
+
+    bench = {}
+    for b in ("SPY", "QQQ"):
+        try:
+            bench[b] = _history(b, total_bars).reindex(common)["Close"].ffill()
+        except Exception:
+            bench[b] = None
+
+    # 評価可能区間を n_folds 個の連続窓に分割
+    last = L - hold - 2
+    first = max(210, last - n_folds * test_bars + 1)
+    span = last - first + 1
+    if span < n_folds * 5:
+        return {"ok": False, "reason": "履歴が短くフォールドを作れません", "fail": fail}
+    fold_size = span // n_folds
+
+    folds = []
+    for kf in range(n_folds):
+        seg0 = first + kf * fold_size
+        seg1 = (first + (kf + 1) * fold_size - 1) if kf < n_folds - 1 else last
+        test_idx = list(range(seg0, seg1 + 1, config.BACKTEST_SAMPLE_EVERY))
+        trades, random_trades = _eval_window(data, common, L, test_idx, theme_fit, dv,
+                                             progress_cb, phase=f"フォールド{kf+1}/{n_folds}")
+        pnls = [t["pnl_pct"] for t in trades]
+        m = _metrics(pnls)
+        _, _, max_dd, total_ret = _equity_and_dd(sorted(trades, key=lambda x: x["date"])) if trades else ([], [], 0.0, 0.0)
+        _, _, _, rand_total = _equity_and_dd(sorted(random_trades, key=lambda x: x["date"])) if random_trades else ([], [], 0.0, 0.0)
+        sharpe = round(float(np.mean(pnls) / np.std(pnls)), 2) if len(pnls) >= 2 and np.std(pnls) else 0.0
+        spy_ret = _bench_window_return(bench.get("SPY"), seg0, seg1, rt) if bench.get("SPY") is not None else None
+        qqq_ret = _bench_window_return(bench.get("QQQ"), seg0, seg1, rt) if bench.get("QQQ") is not None else None
+        folds.append({
+            "fold": kf + 1,
+            "start": str(common[seg0].date()), "end": str(common[seg1].date()),
+            "trades": m.get("trades", 0), "oos_return": round(total_ret, 1),
+            "win_rate": m.get("win_rate", 0.0), "sharpe": sharpe, "max_dd": round(max_dd, 1),
+            "vs_spy": (round(total_ret - spy_ret, 1) if spy_ret is not None else None),
+            "vs_qqq": (round(total_ret - qqq_ret, 1) if qqq_ret is not None else None),
+            "vs_random": round(total_ret - rand_total, 1),
+            "spy": spy_ret, "qqq": qqq_ret, "random": round(rand_total, 1),
+        })
+
+    # 集計
+    def _avg(key):
+        vals = [f[key] for f in folds if f.get(key) is not None]
+        return round(float(np.mean(vals)), 1) if vals else None
+
+    def _beat_rate(key):
+        vals = [f[key] for f in folds if f.get(key) is not None]
+        return (round(sum(1 for v in vals if v > 0) / len(vals) * 100)) if vals else None
+
+    summary = {
+        "n_folds": n_folds, "test_months": test_months,
+        "avg_oos_return": _avg("oos_return"), "avg_win_rate": _avg("win_rate"),
+        "avg_sharpe": _avg("sharpe"), "avg_max_dd": _avg("max_dd"),
+        "worst_max_dd": round(min((f["max_dd"] for f in folds), default=0.0), 1),
+        "total_trades": sum(f["trades"] for f in folds),
+        "beat_spy_pct": _beat_rate("vs_spy"), "beat_qqq_pct": _beat_rate("vs_qqq"),
+        "beat_random_pct": _beat_rate("vs_random"),
+        "positive_folds_pct": round(sum(1 for f in folds if f["oos_return"] > 0) / len(folds) * 100) if folds else 0,
+    }
+    return {"ok": True, "folds": folds, "summary": summary, "fail": fail, "params": params}
 
 
 # ---------------- 集計・比較・提案 ----------------

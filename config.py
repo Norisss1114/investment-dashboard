@@ -412,6 +412,9 @@ BACKTEST_STOP_PCT = 8.0        # 損切り幅(%)
 BACKTEST_TP1_PCT = 10.0        # 利確1(%)
 BACKTEST_TP2_PCT = 20.0        # 利確2(%)
 BACKTEST_TRAIL_PCT = 8.0       # トレーリング幅(%)
+# v20: ウォークフォワード検証（重み固定の連続OOS評価）
+WF_DEFAULT_FOLDS = 4           # フォールド数
+WF_DEFAULT_TEST_MONTHS = 3     # 各フォールドの検証期間（月）
 # v18: 取引コスト（片道・%）。往復 = 2 × (手数料 + スリッページ)
 BACKTEST_FEE_PCT = 0.05        # 手数料（片道, %）
 BACKTEST_SLIPPAGE_PCT = 0.05   # スリッページ（片道, %）

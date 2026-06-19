@@ -1785,6 +1785,14 @@ def render_discovery_backtest(watchlist):
                "数週間〜数ヶ月でどうだったかを検証します。ニュース/現在ファンダは未来情報のため除外。")
     st.warning("⚠️ これは**過去検証**であり、将来の利益を保証しません。過去に有効でも今後有効とは限りません。")
 
+    tab1, tab2 = st.tabs(["📊 通常バックテスト", "🚶 ウォークフォワード検証"])
+    with tab1:
+        _render_bt_single(watchlist)
+    with tab2:
+        _render_bt_walkforward(watchlist)
+
+
+def _render_bt_single(watchlist):
     # ---------- 設定 ----------
     with st.form("bt_form"):
         c = st.columns(3)
@@ -1820,6 +1828,94 @@ def render_discovery_backtest(watchlist):
         result["trades"] = cache.get("trades_sample", [])
 
     _render_bt_result(result)
+
+
+def _wf_run_with_progress(params, n_folds, test_months):
+    prog = st.progress(0.0); status = st.empty(); state = {"start": time.time()}
+
+    def cb(phase, done, total, fail, cur):
+        try:
+            prog.progress(min(1.0, max(0.0, (done / total) if total else 1.0)))
+        except Exception:
+            pass
+        el = time.time() - state["start"]
+        eta = (el / done * (total - done)) if done else 0
+        status.write(f"⏳ {phase} {done}/{total}｜失敗 {fail}｜推定残り {eta:.0f}秒｜{cur}")
+
+    res = bt_mod2.walk_forward(params, n_folds=n_folds, test_months=test_months, progress_cb=cb)
+    prog.progress(1.0)
+    status.write("✅ 完了" if res.get("ok") else "⚠️ " + res.get("reason", "失敗"))
+    return res
+
+
+def _render_bt_walkforward(watchlist):
+    st.caption("重み固定のまま、履歴を連続する複数の期間（フォールド）に分け、各期間の"
+               "アウトオブサンプル(OOS)成績を見ます。**これは最適化ではありません**（重みは再フィットしません）。")
+    with st.form("wf_form"):
+        c = st.columns(3)
+        universe_mode = c[0].selectbox("対象ユニバース", list(config.SCAN_MODES),
+                                       index=list(config.SCAN_MODES).index(config.DEFAULT_SCAN_MODE), key="wf_uni")
+        hold = c[1].selectbox("保有期間", list(config.BACKTEST_HOLD), index=1, key="wf_hold")
+        condition = c[2].selectbox("スコア条件", config.BACKTEST_CONDITION, index=3, key="wf_cond")
+        c2 = st.columns(3)
+        entry = c2[0].selectbox("エントリー方式", config.BACKTEST_ENTRY, key="wf_entry")
+        take = c2[1].selectbox("利確ルール", config.BACKTEST_TAKE, key="wf_take")
+        stop = c2[2].selectbox("損切りルール", config.BACKTEST_STOP, key="wf_stop")
+        c3 = st.columns(2)
+        n_folds = c3[0].selectbox("フォールド数", [3, 4, 5, 6],
+                                  index=[3, 4, 5, 6].index(getattr(config, "WF_DEFAULT_FOLDS", 4)), key="wf_folds")
+        test_months = c3[1].selectbox("各フォールドの検証期間(月)", [2, 3, 6],
+                                      index=[2, 3, 6].index(getattr(config, "WF_DEFAULT_TEST_MONTHS", 3)), key="wf_tm")
+        submitted = st.form_submit_button("▶️ ウォークフォワード実行", width='stretch')
+
+    if not submitted:
+        st.info("設定を選んで「▶️ ウォークフォワード実行」を押してください（重み固定の連続OOS評価・少し時間がかかります）。")
+        return
+
+    params = {"universe_mode": universe_mode, "period": list(config.BACKTEST_PERIODS)[0], "hold": hold,
+              "entry": entry, "take": take, "stop": stop, "condition": condition,
+              "weights": "現在設定", "watchlist": tuple(watchlist)}
+    r = _wf_run_with_progress(params, n_folds, test_months)
+    if not r.get("ok"):
+        st.error("ウォークフォワードを生成できませんでした: " + r.get("reason", ""))
+        return
+
+    s = r["summary"]; folds = r["folds"]
+
+    def _pm(v, suf="%"):
+        return (f"{v:+.1f}{suf}" if isinstance(v, (int, float)) else "—")
+
+    st.subheader("📋 集計（全フォールド）")
+    m = st.columns(4)
+    m[0].metric("平均OOSリターン", _pm(s.get("avg_oos_return")))
+    m[1].metric("平均勝率", f'{s.get("avg_win_rate","—")}%')
+    m[2].metric("平均Sharpe", f'{s.get("avg_sharpe","—")}')
+    m[3].metric("最悪DD", _pm(s.get("worst_max_dd")))
+    m2 = st.columns(4)
+    m2[0].metric("SPYに勝った率", f'{s.get("beat_spy_pct","—")}%')
+    m2[1].metric("QQQに勝った率", f'{s.get("beat_qqq_pct","—")}%')
+    m2[2].metric("ランダムに勝った率", f'{s.get("beat_random_pct","—")}%')
+    m2[3].metric("プラス収益フォールド率", f'{s.get("positive_folds_pct","—")}%')
+
+    st.subheader("🚶 フォールド別結果（連続OOS）")
+    rows = [{
+        "フォールド": f["fold"], "期間": f'{f["start"]}〜{f["end"]}', "トレード": f["trades"],
+        "OOSリターン%": f["oos_return"], "勝率%": f["win_rate"], "Sharpe": f["sharpe"],
+        "最大DD%": f["max_dd"],
+        "vsSPY": (f["vs_spy"] if f["vs_spy"] is not None else "—"),
+        "vsQQQ": (f["vs_qqq"] if f["vs_qqq"] is not None else "—"),
+        "vsランダム": f["vs_random"],
+    } for f in folds]
+    df = pd.DataFrame(rows)
+    st.dataframe(df.style.format({"OOSリターン%": "{:+.1f}", "勝率%": "{:.0f}", "Sharpe": "{:.2f}",
+                                  "最大DD%": "{:.1f}"}),
+                 width='stretch', hide_index=True)
+    if r.get("fail"):
+        st.caption(f"取得失敗でスキップ: {len(r['fail'])}銘柄。")
+    _rt = 2 * (getattr(config, "BACKTEST_FEE_PCT", 0.0) + getattr(config, "BACKTEST_SLIPPAGE_PCT", 0.0))
+    st.caption(f"⚠️ これは**重み固定のアウトオブサンプル(OOS)検証であり、最適化ではありません**。"
+               f"取引コスト（往復 約{_rt:.2f}%）控除済み。各フォールドは連続する未来期間。"
+               "フォールドあたりトレードが少ないと結果はぶれます。将来を保証しません。")
 
 
 def _mini_metrics(m, title):
