@@ -302,3 +302,202 @@ def update_returns(progress_cb=None):
 
     save(recs)
     return len(recs)
+
+
+# ---------------- v27.1: 集計分析（表示のみ・スコア非変更） ----------------
+def _avg(vals):
+    """None を除外した平均(1桁)。該当なしは None。"""
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 1) if vals else None
+
+
+def _win_rate(rets):
+    """ret_30>0 を勝ちとした勝率(%)。母数は ret_30 非Noneのみ。該当なしは None。"""
+    rs = [v for v in rets if v is not None]
+    if not rs:
+        return None
+    return round(sum(1 for v in rs if v > 0) / len(rs) * 100)
+
+
+def _stats(recs):
+    """更新済みレコード群の集計（件数/平均ret7,30/平均vs_spy30/勝率）。"""
+    n = len(recs)
+    return {
+        "n": n,
+        "avg_ret7": _avg([r.get("ret_7") for r in recs]),
+        "avg_ret30": _avg([r.get("ret_30") for r in recs]),
+        "avg_vs_spy30": _avg([r.get("vs_spy_30") for r in recs]),
+        "win_rate": _win_rate([r.get("ret_30") for r in recs]),
+    }
+
+
+def _breakdown(recs, key_fn, multi=False):
+    """key_fn(rec)->ラベル(またはラベルlist) でグルーピングし各グループ統計。"""
+    groups = {}
+    for r in recs:
+        labs = key_fn(r)
+        if labs is None:
+            continue
+        if not multi:
+            labs = [labs]
+        for lab in labs:
+            if lab is None:
+                continue
+            groups.setdefault(lab, []).append(r)
+    rows = []
+    for lab, lst in groups.items():
+        s = _stats(lst)
+        s["label"] = lab
+        rows.append(s)
+    return rows
+
+
+def analytics(records=None):
+    """較正データを集計（表示のみ・スコア非変更）。空/未更新でも落ちない。
+    集計対象は status=='updated'。各平均は None を除外。pending/unavailable は件数のみ。"""
+    recs = records if records is not None else load()
+    if not isinstance(recs, list):
+        recs = []
+    saved = len(recs)
+    updated_recs = [r for r in recs if r.get("status") == "updated"]
+    updated = len(updated_recs)
+    ret7_count = sum(1 for r in updated_recs if r.get("ret_7") is not None)
+    ret30_count = sum(1 for r in updated_recs if r.get("ret_30") is not None)
+
+    overall = {
+        "saved": saved, "updated": updated,
+        "ret7_count": ret7_count, "ret30_count": ret30_count,
+        "avg_ret7": _avg([r.get("ret_7") for r in updated_recs]),
+        "avg_ret30": _avg([r.get("ret_30") for r in updated_recs]),
+        "avg_vs_spy30": _avg([r.get("vs_spy_30") for r in updated_recs]),
+        "win_rate_30": _win_rate([r.get("ret_30") for r in updated_recs]),
+    }
+
+    # impact_score 実値別（-5〜+5。None は除外、負値も保持）。impact 昇順で並べる。
+    by_impact = _breakdown(updated_recs,
+                           lambda r: (r.get("impact_score") if isinstance(r.get("impact_score"), int) else None))
+    by_impact.sort(key=lambda x: x["label"])
+
+    # sentiment 別（bull/neutral/bear の順で固定表示）
+    by_sentiment = _breakdown(updated_recs,
+                             lambda r: (r.get("sentiment") if r.get("sentiment") in ("bull", "neutral", "bear") else None))
+    _sent_order = {"bull": 0, "neutral": 1, "bear": 2}
+    by_sentiment.sort(key=lambda x: _sent_order.get(x["label"], 9))
+
+    # category 別（categories 配列に出現した値ごと・データ駆動）
+    by_category = _breakdown(updated_recs,
+                            lambda r: ([c for c in (r.get("categories") or []) if c] or None),
+                            multi=True)
+    by_category.sort(key=lambda x: -x["n"])
+
+    return {"overall": overall, "by_impact": by_impact,
+            "by_sentiment": by_sentiment, "by_category": by_category}
+
+
+# ---------------- v27.1: 較正提案（ルールベース・表示のみ） ----------------
+def recommendation(records=None):
+    """impact_score の妥当性検証＋強い/弱い条件抽出（表示のみ・スコア非変更）。
+    判定対象 n<3 は low_sample に隔離し提案には使わない。"""
+    a = analytics(records)
+    ov = a["overall"]
+    updated = ov.get("updated", 0)
+    # 判定母数 = ret_30 が計算済みの更新レコード数
+    judged = ov.get("ret30_count", 0) or 0
+
+    if not judged:
+        return {"confidence": "低", "judged": 0,
+                "monotonic_ok": None, "impact_issues": [],
+                "strong": [], "weak": [], "low_sample": [],
+                "suggestions": [], "data_insufficient": True,
+                "next_steps": ["「🔄 較正リターンを更新」で ret_30 が貯まるまで継続してください。"]}
+
+    confidence = "高" if judged >= 10 else "中" if judged >= 5 else "低"
+
+    # n>=3 を有効、n<3 を low_sample に隔離
+    def split(rows, category):
+        ok, low = [], []
+        for r in rows:
+            rec = {"category": category, "label": r["label"], "n": r["n"],
+                   "avg_ret7": r.get("avg_ret7"), "avg_ret30": r.get("avg_ret30"),
+                   "avg_vs_spy30": r.get("avg_vs_spy30"), "win_rate": r.get("win_rate")}
+            (ok if r["n"] >= 3 else low).append(rec)
+        return ok, low
+
+    imp_ok, imp_low = split(a["by_impact"], "impact")
+    sen_ok, sen_low = split(a["by_sentiment"], "sentiment")
+    cat_ok, cat_low = split(a["by_category"], "category")
+    low_sample = imp_low + sen_low + cat_low
+
+    # impact 単調性チェック（impact が高いほど ret_30 平均が高い、が理想）
+    impact_issues = []
+    monotonic_ok = None
+    pts = [(r["label"], r["avg_ret30"]) for r in imp_ok if r["avg_ret30"] is not None]
+    pts.sort(key=lambda x: x[0])
+    if len(pts) >= 2:
+        monotonic_ok = True
+        for i in range(len(pts)):
+            for j in range(i + 1, len(pts)):
+                imp_lo, ret_lo = pts[i]
+                imp_hi, ret_hi = pts[j]
+                # 高impactの平均ret30が低impactより明確に低い → 逆転
+                if ret_hi + 3 < ret_lo:
+                    monotonic_ok = False
+                    impact_issues.append(
+                        f"impact{imp_hi}（平均ret30 {ret_hi:+.1f}%）が impact{imp_lo}（{ret_lo:+.1f}%）より低い "
+                        f"→ impact{imp_hi} は過大評価の可能性")
+    # 高impactなのにマイナス / 低impactなのに高プラス の単発指摘
+    for lab, ret in pts:
+        if lab >= 4 and ret < 0:
+            impact_issues.append(f"impact{lab} は強気想定だが平均ret30 {ret:+.1f}% → 過大評価の可能性")
+        if lab <= 1 and ret >= 5:
+            impact_issues.append(f"impact{lab} は弱め想定だが平均ret30 {ret:+.1f}% → 過小評価の可能性")
+
+    # 強い/弱い条件抽出（全カテゴリ横断・n>=3）
+    osr = ov.get("avg_ret30")
+    strong, weak = [], []
+    for rec in (imp_ok + sen_ok + cat_ok):
+        ar = rec.get("avg_ret30")
+        av = rec.get("avg_vs_spy30")
+        wr = rec.get("win_rate")
+        is_strong = ((ar is not None and ar >= 5) or (av is not None and av >= 3)
+                     or (wr is not None and wr >= 70))
+        is_weak = ((ar is not None and ar <= -5) or (av is not None and av <= -3)
+                   or (wr is not None and wr <= 30))
+        if is_strong and not is_weak:
+            strong.append(rec)
+        elif is_weak:
+            weak.append(rec)
+    strong.sort(key=lambda x: -(x["avg_ret30"] if x["avg_ret30"] is not None else -999))
+    weak.sort(key=lambda x: (x["avg_ret30"] if x["avg_ret30"] is not None else 999))
+
+    _cat_label = {"impact": "impact", "sentiment": "sentiment", "category": "category"}
+
+    def line(r, tail):
+        bits = []
+        if r["avg_ret30"] is not None:
+            bits.append(f'平均ret30 {r["avg_ret30"]:+.1f}%')
+        if r["avg_vs_spy30"] is not None:
+            bits.append(f'vsSPY {r["avg_vs_spy30"]:+.1f}%')
+        if r["win_rate"] is not None:
+            bits.append(f'勝率{r["win_rate"]}%')
+        return f'{_cat_label[r["category"]]}「{r["label"]}」：' + " / ".join(bits) + f'（n={r["n"]}）→ {tail}'
+
+    suggestions = list(impact_issues)
+    for r in strong[:4]:
+        suggestions.append(line(r, "当たりやすい傾向"))
+    for r in weak[:4]:
+        suggestions.append(line(r, "外しやすい/過信注意"))
+    if confidence != "高":
+        suggestions.append("サンプルが少ないため参考値です。まだニューススコアには反映しないでください。")
+
+    next_steps = ["「🔄 較正リターンを更新」で ret_30 を増やし、判定対象 n≥10 を目指してください。"]
+    if impact_issues:
+        next_steps.append("impact_score の妥当性に疑問あり。逆転している impact 帯の中身を確認してください。")
+    if strong:
+        next_steps.append("当たりやすい条件は、まず手動で傾向を確認（スコア重み変更はまだしない）。")
+
+    return {"confidence": confidence, "judged": judged,
+            "monotonic_ok": monotonic_ok, "impact_issues": impact_issues,
+            "strong": strong, "weak": weak, "low_sample": low_sample,
+            "suggestions": suggestions, "data_insufficient": False,
+            "next_steps": next_steps}

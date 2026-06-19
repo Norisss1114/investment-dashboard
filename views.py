@@ -509,6 +509,81 @@ def _render_news_calibration(ticker):
         st.caption("※実日付付き（Finnhub datetime）のニュースのみ保存。**スコア・ランキングには未使用（較正用データ）。**")
 
 
+def _ncal_bd_df(rows, label_name):
+    """analytics の breakdown 行を表示用 DataFrame に。"""
+    def _f(v):
+        return (f"{v:+.1f}%" if isinstance(v, (int, float)) else "—")
+    return pd.DataFrame([{
+        label_name: r["label"], "件数": r["n"],
+        "平均ret7": _f(r.get("avg_ret7")), "平均ret30": _f(r.get("avg_ret30")),
+        "平均vsSPY30": _f(r.get("avg_vs_spy30")),
+        "勝率%": (r["win_rate"] if r.get("win_rate") is not None else "—"),
+    } for r in rows])
+
+
+def _render_news_calibration_analytics():
+    """v27.1: ニュース較正データの集計分析（全銘柄横断・表示のみ・スコア非反映）。"""
+    with st.expander("📊 ニュース較正分析（全銘柄横断の集計／本番スコア未反映）", expanded=False):
+        a = ncal_mod.analytics()
+        ov = a["overall"]
+        if not ov["saved"]:
+            st.info("較正データがまだありません。上の「🧪 ニュース較正データ」で保存してください。")
+            return
+        if not ov["updated"]:
+            st.info("更新済みデータがありません（「🔄 較正リターンを更新」でリターンを計算してください）。")
+            st.caption(f"保存 {ov['saved']} 件 ／ 更新済み 0 件")
+            return
+
+        if (ov.get("ret30_count") or 0) < 5:
+            st.warning("サンプルが少ないため参考値です。まだニューススコアには反映しないでください。")
+
+        def _f(v):
+            return (f"{v:+.1f}%" if isinstance(v, (int, float)) else "—")
+
+        m = st.columns(4)
+        m[0].metric("保存件数", ov["saved"])
+        m[1].metric("更新済み", ov["updated"])
+        m[2].metric("ret7件数", ov["ret7_count"])
+        m[3].metric("ret30件数", ov["ret30_count"])
+        m2 = st.columns(4)
+        m2[0].metric("平均ret7", _f(ov["avg_ret7"]))
+        m2[1].metric("平均ret30", _f(ov["avg_ret30"]))
+        m2[2].metric("平均vsSPY30", _f(ov["avg_vs_spy30"]))
+        m2[3].metric("ret30勝率", f'{ov["win_rate_30"]}%' if ov["win_rate_30"] is not None else "—")
+
+        blocks = [("impact_score別（-5〜+5実値）", a["by_impact"], "impact"),
+                  ("sentiment別", a["by_sentiment"], "sentiment"),
+                  ("category別（出現値ごと）", a["by_category"], "category")]
+        for title, rows, label_name in blocks:
+            st.markdown(f"**{title}**")
+            if rows:
+                st.dataframe(_ncal_bd_df(rows, label_name), width='stretch', hide_index=True)
+            else:
+                st.caption("該当データなし（更新後に集計されます）。")
+
+        # 🧠 較正提案
+        st.divider()
+        st.subheader("🧠 較正提案（impact_score の妥当性チェック）")
+        rec = ncal_mod.recommendation()
+        if rec.get("data_insufficient"):
+            st.info("判定対象（ret_30 計算済み）がまだありません。")
+        else:
+            st.caption(f"信頼度：{rec['confidence']}（判定対象 n={rec['judged']}）"
+                       + ("　｜impact単調性：" + ("OK" if rec.get("monotonic_ok") else "逆転あり")
+                          if rec.get("monotonic_ok") is not None else ""))
+            for sug in rec.get("suggestions", []):
+                st.markdown(f"- {sug}")
+            if rec.get("low_sample"):
+                with st.expander(f"サンプル不足（n<3・判断に未使用）{len(rec['low_sample'])}件", expanded=False):
+                    for r in rec["low_sample"]:
+                        st.caption(f"・{r['category']}「{r['label']}」 n={r['n']}")
+            if rec.get("next_steps"):
+                st.markdown("**次にやること**")
+                for ns in rec["next_steps"]:
+                    st.markdown(f"- {ns}")
+        st.caption("※集計・提案は参考表示です。**ニューススコア・発掘スコア・ランキングには一切反映していません。**")
+
+
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):
     st.header("🔎 個別銘柄分析")
@@ -554,6 +629,7 @@ def render_stock(rmap, watch=None, positions=None):
     _render_scenario_forecast(r, sel, f, psrc, positions)
     _render_sec_edgar(sel, f)
     _render_news_calibration(sel)
+    _render_news_calibration_analytics()
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
