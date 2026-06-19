@@ -1998,11 +1998,13 @@ def render_discovery_backtest(watchlist):
                "数週間〜数ヶ月でどうだったかを検証します。ニュース/現在ファンダは未来情報のため除外。")
     st.warning("⚠️ これは**過去検証**であり、将来の利益を保証しません。過去に有効でも今後有効とは限りません。")
 
-    tab1, tab2 = st.tabs(["📊 通常バックテスト", "🚶 ウォークフォワード検証"])
+    tab1, tab2, tab3 = st.tabs(["📊 通常バックテスト", "🚶 ウォークフォワード検証", "🧪 改善案検証"])
     with tab1:
         _render_bt_single(watchlist)
     with tab2:
         _render_bt_walkforward(watchlist)
+    with tab3:
+        _render_bt_improvement(watchlist)
 
 
 def _render_bt_single(watchlist):
@@ -2129,6 +2131,95 @@ def _render_bt_walkforward(watchlist):
     st.caption(f"⚠️ これは**重み固定のアウトオブサンプル(OOS)検証であり、最適化ではありません**。"
                f"取引コスト（往復 約{_rt:.2f}%）控除済み。各フォールドは連続する未来期間。"
                "フォールドあたりトレードが少ないと結果はぶれます。将来を保証しません。")
+
+
+def _wf_progress():
+    prog = st.progress(0.0); status = st.empty(); state = {"start": time.time()}
+
+    def cb(phase, done, total, fail, cur):
+        try:
+            prog.progress(min(1.0, max(0.0, (done / total) if total else 1.0)))
+        except Exception:
+            pass
+        status.write(f"⏳ {phase} {done}/{total}｜{cur}")
+    return cb, prog, status
+
+
+_VERDICT_COLOR = {"改善": "#16a34a", "変化なし": "#64748b", "悪化": "#dc2626", "サンプル不足": "#94a3b8"}
+
+
+def _render_bt_improvement(watchlist):
+    st.caption("v23の改善提案（相対強度/スコア/市場上位/セクター中立/リーダー）を**仮フィルター**として、"
+               "通常バックテストと比較します。**検証専用で、本番スコア・発掘ランキングには反映しません。**")
+    with st.form("improve_form"):
+        c = st.columns(3)
+        universe_mode = c[0].selectbox("対象ユニバース", list(config.SCAN_MODES),
+                                       index=list(config.SCAN_MODES).index(config.DEFAULT_SCAN_MODE), key="imp_uni")
+        period = c[1].selectbox("期間", list(config.BACKTEST_PERIODS), index=2, key="imp_period")
+        hold = c[2].selectbox("保有期間", list(config.BACKTEST_HOLD), index=1, key="imp_hold")
+        c2 = st.columns(3)
+        entry = c2[0].selectbox("エントリー方式", config.BACKTEST_ENTRY, key="imp_entry")
+        take = c2[1].selectbox("利確ルール", config.BACKTEST_TAKE, key="imp_take")
+        stop = c2[2].selectbox("損切りルール", config.BACKTEST_STOP, key="imp_stop")
+        condition = st.selectbox("ベースのスコア条件", config.BACKTEST_CONDITION, index=4, key="imp_cond")
+        names = [n for n, _ in bt_mod2.IMPROVEMENT_FILTERS]
+        chosen = st.multiselect("検証する改善フィルター", names, default=names, key="imp_filters")
+        submitted = st.form_submit_button("🧪 改善案を検証", width='stretch')
+
+    if not submitted:
+        st.info("フィルターを選んで「🧪 改善案を検証」を押してください（検証専用・ボタン実行）。")
+        return
+
+    params = {"universe_mode": universe_mode, "period": period, "hold": hold, "entry": entry,
+              "take": take, "stop": stop, "condition": condition, "weights": "現在設定",
+              "watchlist": tuple(watchlist)}
+    filters = [(n, spec) for n, spec in bt_mod2.IMPROVEMENT_FILTERS if n in chosen] or bt_mod2.IMPROVEMENT_FILTERS
+    cb, prog, status = _wf_progress()
+    r = bt_mod2.compare_improvement(params, filters=filters, progress_cb=cb)
+    prog.progress(1.0)
+    if not r.get("ok"):
+        status.write("⚠️ " + r.get("reason", "失敗"))
+        st.error("検証を生成できませんでした: " + r.get("reason", ""))
+        return
+    status.write("✅ 完了")
+
+    b = r["baseline"]
+    st.subheader("📊 通常バックテスト（ベースライン）")
+    mm = st.columns(4)
+    mm[0].metric("total_return", f'{b["total_return"]:+.1f}%')
+    mm[1].metric("勝率", f'{b["win_rate"]:.0f}%')
+    mm[2].metric("avg_return", f'{b["avg_return"]:+.2f}%')
+    mm[3].metric("トレード数", b["trade_count"])
+
+    st.subheader("🧪 改善案との比較")
+    rows = [{
+        "フィルター": "（ベースライン）", "判定": "—", "total_return%": b["total_return"], "勝率%": b["win_rate"],
+        "avg_return%": b["avg_return"], "Sharpe": b["sharpe"], "最大DD%": b["max_drawdown"],
+        "トレード数": b["trade_count"],
+        "vsSPY": (b["vs_spy"] if b["vs_spy"] is not None else "—"),
+        "vsQQQ": (b["vs_qqq"] if b["vs_qqq"] is not None else "—"), "vsランダム": b["vs_random"],
+    }]
+    for v in r["variants"]:
+        rows.append({
+            "フィルター": v["name"], "判定": v["verdict"], "total_return%": v["total_return"], "勝率%": v["win_rate"],
+            "avg_return%": v["avg_return"], "Sharpe": v["sharpe"], "最大DD%": v["max_drawdown"],
+            "トレード数": v["trade_count"],
+            "vsSPY": (v["vs_spy"] if v["vs_spy"] is not None else "—"),
+            "vsQQQ": (v["vs_qqq"] if v["vs_qqq"] is not None else "—"), "vsランダム": v["vs_random"],
+        })
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df.style
+        .map(lambda v: f'background-color:{_VERDICT_COLOR.get(v,"#64748b")};color:white;font-weight:700;'
+             if v in _VERDICT_COLOR else "", subset=["判定"])
+        .format({"total_return%": "{:+.1f}", "勝率%": "{:.0f}", "avg_return%": "{:+.2f}",
+                 "Sharpe": "{:.2f}", "最大DD%": "{:.1f}"}),
+        width='stretch', hide_index=True)
+    if r.get("fail"):
+        st.caption(f"取得失敗でスキップ: {len(r['fail'])}銘柄。")
+    st.caption("判定: total_returnがベースライン+3%以上かつトレード数がベースラインの30%以上→改善 ／ −3%以上→悪化 ／ "
+               "その他→変化なし ／ トレード数<10→サンプル不足。PIT（当日情報のみ）で検証。"
+               "⚠️ **これは検証専用であり、本番スコアには反映していません。**")
 
 
 def _mini_metrics(m, title):

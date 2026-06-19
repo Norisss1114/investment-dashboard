@@ -112,10 +112,163 @@ def _simulate(d, entry_idx, hold, entry_price, take_rule, stop_rule):
     return ret * 100, end_idx - entry_idx, "期間終了"
 
 
+# ---------------- v24: 改善案検証（PIT派生フィルター・検証専用） ----------------
+# プリセット（discovery_backtest 内に固定。本番スコア/ランキングには一切影響しない）
+IMPROVEMENT_FILTERS = [
+    ("相対強度 上位10%", {"rs_max": 10}),
+    ("相対強度 上位25%", {"rs_max": 25}),
+    ("スコア80以上", {"score_min": 80}),
+    ("スコア85以上", {"score_min": 85}),
+    ("スコア90以上", {"score_min": 90}),
+    ("市場上位10%", {"market_pct_max": 10}),
+    ("市場上位25%", {"market_pct_max": 25}),
+    ("セクター中立 +0以上", {"sector_neutral_min": 0}),
+    ("セクター中立 +5以上", {"sector_neutral_min": 5}),
+    ("リーダーのみ", {"leader_only": True}),
+]
+
+
+def _pit_metrics(scored, rser, theme_fit):
+    """その検証日の横断情報だけから market_pct / rs_pct / sector_neutral / leader を算出（PIT）。
+    scored=[(t,sc,vd,snap,rank)...]。未来情報・ニュース・現在ファンダは一切使わない。"""
+    total = len(scored) or 1
+    sec_scores = {}
+    for (t, sc, vd, snap, rank) in scored:
+        sec_scores.setdefault(theme_fit[t][1], []).append((t, sc))
+    sec_mean, sec_rank, sec_cnt = {}, {}, {}
+    for s, lst in sec_scores.items():
+        sec_mean[s] = sum(x[1] for x in lst) / len(lst)
+        for r2, (tt, _s) in enumerate(sorted(lst, key=lambda x: -x[1]), 1):
+            sec_rank[tt] = r2
+        for (tt, _s) in lst:
+            sec_cnt[tt] = len(lst)
+    pit = {}
+    for (t, sc, vd, snap, rank) in scored:
+        sec = theme_fit[t][1]
+        scnt = sec_cnt.get(t, 1) or 1
+        sr = sec_rank.get(t, scnt)
+        ratio = sr / scnt
+        leader = "リーダー" if (sr == 1 or ratio <= 0.3) else ("弱い" if ratio >= 0.7 else "フォロワー")
+        pit[t] = {
+            "market_pct": max(1, round(rank / total * 100)),
+            "rs_pct": max(1, round((1 - float(rser[t])) * 100)),
+            "sector_neutral": round(sc - sec_mean.get(sec, sc), 1),
+            "leader": leader,
+        }
+    return pit
+
+
+def _window_metrics(trades, random_trades, bench, common, period_bars):
+    """検証窓のトレード群から比較用メトリクスを算出（v18同様にコスト反映）。"""
+    pnls = [t["pnl_pct"] for t in trades]
+    m = _metrics(pnls)
+    _, _, max_dd, total_ret = _equity_and_dd(sorted(trades, key=lambda x: x["date"])) if trades else ([], [], 0.0, 0.0)
+    _, _, _, rand_total = _equity_and_dd(sorted(random_trades, key=lambda x: x["date"])) if random_trades else ([], [], 0.0, 0.0)
+    sharpe = round(float(np.mean(pnls) / np.std(pnls)), 2) if len(pnls) >= 2 and np.std(pnls) else 0.0
+    rt = _round_trip_cost()
+    spy = _benchmark_return(bench.get("SPY"), common, period_bars)
+    qqq = _benchmark_return(bench.get("QQQ"), common, period_bars)
+    spy = round(spy - rt, 1) if spy is not None else None
+    qqq = round(qqq - rt, 1) if qqq is not None else None
+    return {
+        "trade_count": m.get("trades", 0), "win_rate": m.get("win_rate", 0.0),
+        "avg_return": m.get("expectancy", 0.0), "total_return": round(total_ret, 1),
+        "sharpe": sharpe, "max_drawdown": round(max_dd, 1),
+        "vs_spy": (round(total_ret - spy, 1) if spy is not None else None),
+        "vs_qqq": (round(total_ret - qqq, 1) if qqq is not None else None),
+        "vs_random": round(total_ret - rand_total, 1),
+    }
+
+
+def _improve_verdict(base, var):
+    """改善/悪化/変化なし/サンプル不足。主判定=total_return、補助=trade_count。"""
+    if var["trade_count"] < 10:
+        return "サンプル不足"
+    dr = var["total_return"] - base["total_return"]
+    if dr >= 3 and var["trade_count"] >= max(1, base["trade_count"] * 0.3):
+        return "改善"
+    if dr <= -3:
+        return "悪化"
+    return "変化なし"
+
+
+def compare_improvement(params, filters=None, progress_cb=None):
+    """通常バックテスト vs 改善案（PITフィルター）バックテストを比較（検証専用・本番非変更）。
+    データは1回だけ取得し、ベースライン＋各フィルターを同一データで評価する。"""
+    filters = filters if filters is not None else IMPROVEMENT_FILTERS
+    dv = _derive_params(params)
+    hold = dv["hold"]
+    period_m = config.BACKTEST_PERIODS[params["period"]]
+    period_bars = period_m * 21
+    total_bars = 210 + period_bars + hold + 10
+
+    tickers, sources, meta = universe.build_universe(params["universe_mode"], params.get("watchlist", ()))
+    tickers = tickers[:config.BACKTEST_MAX_TICKERS]
+    data, fail = {}, []
+    for t in tickers:
+        try:
+            d = _prep(_history(t, total_bars))
+            if len(d) >= 230:
+                data[t] = d
+            else:
+                fail.append(t)
+        except Exception:
+            fail.append(t)
+    if not data:
+        return {"ok": False, "reason": "有効データなし", "fail": fail}
+    common = None
+    for d in data.values():
+        common = d.index if common is None else common.intersection(d.index)
+    common = common.sort_values()
+    for t in list(data.keys()):
+        data[t] = data[t].reindex(common).dropna(subset=["Close"])
+    L = len(common)
+    if L < 230:
+        return {"ok": False, "reason": "履歴期間が不足", "fail": fail}
+
+    theme_fit = {}
+    for t in data:
+        th = themes_mod.classify(t)
+        wt = 0.0
+        for x in th:
+            for key, val in config.CURRENT_THEMES.items():
+                if key == x or key in x:
+                    wt = max(wt, val)
+        theme_fit[t] = (wt, th[0] if th else "未分類", th)
+
+    bench = {}
+    for b in ("SPY", "QQQ"):
+        try:
+            bench[b] = _history(b, total_bars).reindex(common).dropna(subset=["Close"])
+        except Exception:
+            bench[b] = None
+
+    first = max(205, L - period_bars)
+    last = L - hold - 2
+    test_idx = list(range(first, last + 1, config.BACKTEST_SAMPLE_EVERY))
+
+    bt, br = _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb, phase="ベースライン")
+    base = _window_metrics(bt, br, bench, common, period_bars)
+
+    variants = []
+    for k, (name, spec) in enumerate(filters, 1):
+        ft, fr = _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb,
+                              phase=f"検証 {name}", post_filter=spec)
+        vm = _window_metrics(ft, fr, bench, common, period_bars)
+        vm["name"] = name
+        vm["filter"] = spec
+        vm["verdict"] = _improve_verdict(base, vm)
+        variants.append(vm)
+
+    return {"ok": True, "baseline": base, "variants": variants, "fail": fail, "params": params}
+
+
 # ---------------- v20: 1検証窓の評価（run_backtest / walk_forward 共通） ----------------
-def _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb=None, phase="検証"):
+def _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb=None, phase="検証", post_filter=None):
     """指定 test_idx（検証日インデックス群）でトレード＋ランダム比較を生成して返す。
-    ロジックは従来 run_backtest の内側ループと同一（出力不変）。dv=派生パラメータ。"""
+    ロジックは従来 run_backtest の内側ループと同一。
+    v24: post_filter（PIT派生のフィルター辞書）が指定された時だけ picks をサブセット化（検証専用）。
+    post_filter=None なら従来と完全に同一の出力（回帰なし）。"""
     Wt = dv["Wt"]; rsi_thr = dv["rsi_thr"]; vol_cond = dv["vol_cond"]; cond = dv["cond"]
     entry_method = dv["entry_method"]; hold = dv["hold"]; take_rule = dv["take_rule"]
     stop_rule = dv["stop_rule"]; rt_cost = dv["rt_cost"]
@@ -162,7 +315,28 @@ def _eval_window(data, common, L, test_idx, theme_fit, dv, progress_cb=None, pha
             if cond == "スコア上位TOP10":
                 return rank <= 10
             return rank <= 20
-        picks = [it for it in scored if passes(it)][:config.BACKTEST_MAX_PICKS]
+
+        # v24: PIT派生メトリクスでの検証フィルター（post_filter指定時のみ）。当日横断情報だけ使用。
+        pit = _pit_metrics(scored, rser, theme_fit) if post_filter else None
+
+        def _post_ok(item):
+            if not post_filter:
+                return True
+            t, sc, vd, snap, rank = item
+            p = pit.get(t, {})
+            if "rs_max" in post_filter and not (p.get("rs_pct") is not None and p["rs_pct"] <= post_filter["rs_max"]):
+                return False
+            if "score_min" in post_filter and not (sc >= post_filter["score_min"]):
+                return False
+            if "market_pct_max" in post_filter and not (p.get("market_pct") is not None and p["market_pct"] <= post_filter["market_pct_max"]):
+                return False
+            if "sector_neutral_min" in post_filter and not (p.get("sector_neutral") is not None and p["sector_neutral"] >= post_filter["sector_neutral_min"]):
+                return False
+            if post_filter.get("leader_only") and p.get("leader") != "リーダー":
+                return False
+            return True
+
+        picks = [it for it in scored if passes(it) and _post_ok(it)][:config.BACKTEST_MAX_PICKS]
 
         date = common[i]
         for t, sc, vd, snap, rank in picks:
