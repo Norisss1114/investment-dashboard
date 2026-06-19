@@ -303,3 +303,78 @@ def analytics(records=None):
     return {"overall": overall, "by_score": by_score, "by_sector": by_sector,
             "by_reason": by_reason, "by_verdict": by_verdict,
             "by_leader": by_leader, "by_rs": by_rs}
+
+
+# ---------------- v23: 改善提案（ルールベース・表示のみ） ----------------
+_CATEGORIES = [("スコア帯", "by_score"), ("セクター", "by_sector"), ("理由", "by_reason"),
+               ("判定", "by_verdict"), ("リーダー", "by_leader"), ("相対強度", "by_rs")]
+
+
+def recommendation(records=None):
+    """analytics をもとに、強い/弱い条件と改善提案を返す（表示のみ・スコア非変更）。"""
+    a = analytics(records)
+    ov = a["overall"]
+    judged = ov.get("n", 0)
+    osr = ov.get("success_rate")
+
+    if not judged:
+        return {"confidence": "低", "judged": 0, "overall_success": None,
+                "strong": [], "weak": [], "low_sample": [], "suggestions": [],
+                "next_steps": ["30日後データが増えるまで継続追跡してください。"],
+                "data_insufficient": True}
+
+    confidence = "高" if judged >= 10 else "中" if judged >= 5 else "低"
+
+    strong, weak, low_sample = [], [], []
+    for cat_name, key in _CATEGORIES:
+        for row in a.get(key, []):
+            n = row.get("n", 0)
+            label = row.get("label")
+            if n < 3:
+                low_sample.append({"category": cat_name, "label": label, "n": n})
+                continue
+            sr = row.get("success_rate")
+            ar = row.get("avg_ret30")
+            av = row.get("avg_vs_spy30")
+            rec = {"category": cat_name, "label": label, "success_rate": sr,
+                   "avg_ret30": ar, "avg_vs_spy30": av, "n": n}
+            is_strong = ((osr is not None and sr is not None and sr >= osr + 15)
+                         or (ar is not None and ar >= 5) or (av is not None and av >= 3))
+            is_weak = ((osr is not None and sr is not None and sr <= osr - 15)
+                       or (ar is not None and ar <= -5) or (av is not None and av <= -3))
+            if is_strong and not is_weak:
+                strong.append(rec)
+            elif is_weak:
+                weak.append(rec)
+
+    strong.sort(key=lambda x: -(x["success_rate"] if x["success_rate"] is not None else -1))
+    weak.sort(key=lambda x: (x["success_rate"] if x["success_rate"] is not None else 999))
+
+    # 提案文（動的＋固定の注意）
+    suggestions = []
+    for r in strong[:4]:
+        bits = [f'成功率{r["success_rate"]}%'] if r["success_rate"] is not None else []
+        if r["avg_ret30"] is not None:
+            bits.append(f'平均ret30 {r["avg_ret30"]:+.1f}%')
+        if r["avg_vs_spy30"] is not None:
+            bits.append(f'vsSPY {r["avg_vs_spy30"]:+.1f}%')
+        suggestions.append(f'{r["category"]}「{r["label"]}」は{"・".join(bits)} → 今後も重視候補')
+    for r in weak[:4]:
+        bits = [f'成功率{r["success_rate"]}%'] if r["success_rate"] is not None else []
+        if r["avg_ret30"] is not None:
+            bits.append(f'平均ret30 {r["avg_ret30"]:+.1f}%')
+        suggestions.append(f'{r["category"]}「{r["label"]}」は{"・".join(bits)} → 過信しない/要確認')
+    if confidence != "高":
+        suggestions.append("サンプルが少ないため参考値です。まだ重み変更はしないでください。")
+
+    # 次に見るべきこと
+    next_steps = ["30日後データが増えるまで継続追跡。"]
+    weak_reasons = [r["label"] for r in weak if r["category"] == "理由"][:3]
+    if weak_reasons:
+        next_steps.append("失敗が多い理由（" + " / ".join(weak_reasons) + "）の中身を確認。")
+    if strong:
+        next_steps.append("成功率が高い条件を発掘バックテスト/ウォークフォワードで検証。")
+
+    return {"confidence": confidence, "judged": judged, "overall_success": osr,
+            "strong": strong, "weak": weak, "low_sample": low_sample,
+            "suggestions": suggestions, "next_steps": next_steps, "data_insufficient": False}

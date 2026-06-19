@@ -1467,6 +1467,8 @@ def _render_discovery_tracking():
 
     # ---------- v22.1: 📊 発掘成績（集計・表示のみ） ----------
     _render_tracking_analytics(recs)
+    # ---------- v23: 🧠 改善提案（ルールベース・表示のみ） ----------
+    _render_tracking_recommendation(recs)
 
 
 def _track_bd_df(rows, label_name):
@@ -1506,6 +1508,67 @@ def _render_tracking_analytics(recs):
             st.dataframe(_track_bd_df(rows, label_name), width='stretch', hide_index=True)
         else:
             st.caption("該当データなし（実績更新後・新規追跡分で集計されます）。")
+
+
+def _reco_line(r):
+    parts = []
+    if r.get("success_rate") is not None:
+        parts.append(f'成功率{r["success_rate"]}%')
+    if r.get("avg_ret30") is not None:
+        parts.append(f'ret30 {r["avg_ret30"]:+.1f}%')
+    if r.get("avg_vs_spy30") is not None:
+        parts.append(f'vsSPY {r["avg_vs_spy30"]:+.1f}%')
+    return f'{r["category"]}「{r["label"]}」：' + " / ".join(parts) + f'（n={r["n"]}）'
+
+
+def _render_tracking_recommendation(recs):
+    st.divider()
+    st.subheader("🧠 改善提案")
+    st.caption("⚠️ 追跡実績からの参考提案です。今回はスコア/重みには反映しません（表示のみ）。")
+    rec = track_mod.recommendation(recs)
+    if rec.get("data_insufficient"):
+        st.info("判定済みデータがありません（「🔄 実績を更新」で30日経過分が判定され、提案が表示されます）。")
+        return
+
+    conf = rec["confidence"]
+    cc = {"高": "#16a34a", "中": "#eab308", "低": "#dc2626"}.get(conf, "#64748b")
+    st.markdown(f'信頼度：<b style="color:{cc};">{conf}</b>'
+                f'（判定済み {rec["judged"]}件・全体成功率 '
+                f'{rec["overall_success"] if rec["overall_success"] is not None else "—"}%）',
+                unsafe_allow_html=True)
+    if conf != "高":
+        st.warning("サンプルが少ないため参考値です。まだ重み変更はしないでください。")
+
+    st.markdown("**✅ 強く効いている条件**")
+    if rec["strong"]:
+        for r in rec["strong"][:8]:
+            st.markdown(f'<div style="border-left:4px solid #16a34a;padding:2px 0 2px 10px;margin-bottom:3px;">'
+                        f'{_reco_line(r)}</div>', unsafe_allow_html=True)
+    else:
+        st.caption("まだ明確に強い条件は見つかっていません")
+
+    st.markdown("**⚠️ 注意すべき条件**")
+    if rec["weak"]:
+        for r in rec["weak"][:8]:
+            st.markdown(f'<div style="border-left:4px solid #dc2626;padding:2px 0 2px 10px;margin-bottom:3px;">'
+                        f'{_reco_line(r)}</div>', unsafe_allow_html=True)
+    else:
+        st.caption("まだ明確に弱い条件は見つかっていません")
+
+    st.markdown("**📌 改善提案**")
+    if rec["suggestions"]:
+        for s in rec["suggestions"]:
+            st.write("・" + s)
+    else:
+        st.caption("提案はまだありません（データ蓄積中）。")
+
+    st.markdown("**🔭 次に見るべきこと**")
+    for s in rec["next_steps"]:
+        st.write("・" + s)
+
+    if rec["low_sample"]:
+        with st.expander(f"サンプル不足の条件（n<3・{len(rec['low_sample'])}件）", expanded=False):
+            st.caption(" / ".join(f'{x["category"]}:{x["label"]}({x["n"]})' for x in rec["low_sample"][:40]))
 
 
 _LEADER_COLOR = {"リーダー": "#15803d", "フォロワー": "#0ea5e9", "弱い": "#dc2626"}
