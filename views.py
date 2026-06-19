@@ -1466,6 +1466,20 @@ def _reason_chips(reasons, limit=6):
     return _wrap_chips(chips)
 
 
+def _sector_neutral_chips(it):
+    """v21: セクター平均 / 中立スコア / Z をチップ化（あるものだけ・表示のみ）。"""
+    chips = []
+    if it.get("sector_avg") is not None:
+        chips.append(_chip_html(f'セクター平均 {it["sector_avg"]}', "#475569", "#f1f5f9"))
+    sn = it.get("sector_neutral")
+    if sn is not None:
+        color, bg = ("#15803d", "#dcfce7") if sn >= 0 else ("#b91c1c", "#fee2e2")
+        chips.append(_chip_html(f'中立 {sn:+.1f}', color, bg, bold=True))
+    if it.get("sector_z") is not None:
+        chips.append(_chip_html(f'Z {it["sector_z"]:+.2f}', "#7c3aed", "#ede9fe"))
+    return _wrap_chips(chips)
+
+
 def _render_discovery_result(disc, regime):
     stt = disc["stats"]
     s = st.columns(5)
@@ -1496,8 +1510,9 @@ def _render_discovery_result(disc, regime):
                     f'<div style="margin-top:4px;"><span style="font-size:1.7rem;font-weight:900;color:#1d1d1f;">{it["score"]}</span>'
                     f'<span style="font-size:0.85rem;color:{c};font-weight:700;"> {it["verdict"]}・信頼{it["confidence"]}</span></div>'
                     f'</div>', unsafe_allow_html=True)
-                # 3. ランキングチップ / 4. 比較チップ / 5. 発掘理由チップ
-                for html in (_rank_chips(it), _vs_chips(it), _reason_chips(it.get("reasons"), limit=6)):
+                # 3. ランキングチップ / 4. 比較チップ / 5. 発掘理由チップ（v21: セクター中立も）
+                for html in (_rank_chips(it), _sector_neutral_chips(it), _vs_chips(it),
+                             _reason_chips(it.get("reasons"), limit=6)):
                     if html:
                         st.markdown(html, unsafe_allow_html=True)
                 # 6. ウォッチ追加ボタン
@@ -1532,7 +1547,8 @@ def _render_discovery_result(disc, regime):
                                 f'{_leader_badge(it)}</div>'
                                 f'<div style="color:#8a8a8e;font-size:0.8rem;">{it.get("name","")}｜{it["sector"]}｜{_stars(it["score"])}</div>',
                                 unsafe_allow_html=True)
-                    for html in (_rank_chips(it), _vs_chips(it), _reason_chips(it.get("reasons"), limit=5)):
+                    for html in (_rank_chips(it), _sector_neutral_chips(it), _vs_chips(it),
+                                 _reason_chips(it.get("reasons"), limit=5)):
                         if html:
                             st.markdown(html, unsafe_allow_html=True)
                     rp = it.get("risk_points") or []
@@ -1557,6 +1573,9 @@ def _render_discovery_result(disc, regime):
                 "市場上位%": (it.get("market_pct") if it.get("market_pct") is not None else "—"),
                 "セクター順位": (f'{it["sector_rank"]}/{it["sector_count"]}'
                               if it.get("sector_rank") and it.get("sector_count") else "—"),
+                "セクター平均": (it.get("sector_avg") if it.get("sector_avg") is not None else "—"),
+                "中立スコア": (it.get("sector_neutral") if it.get("sector_neutral") is not None else "—"),
+                "Z": (it.get("sector_z") if it.get("sector_z") is not None else "—"),
                 "相対強度%": (it.get("rs_pct") if it.get("rs_pct") is not None else "—"),
                 "vsSPY": (it.get("vs_spy") if it.get("vs_spy") is not None else "—"),
                 "vsQQQ": (it.get("vs_qqq") if it.get("vs_qqq") is not None else "—"),

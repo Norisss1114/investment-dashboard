@@ -161,6 +161,14 @@ def _attach_rankings(items, excluded, pool):
             sec_rank[p["ticker"]] = i + 1
         for p in lst:
             sec_count[p["ticker"]] = len(lst)
+    # v21: セクター平均・母集団標準偏差（自銘柄含む単純平均）
+    sec_avg, sec_std = {}, {}
+    for sec, lst in sectors.items():
+        scores = [p["score"] for p in lst]
+        avg = sum(scores) / len(scores)
+        var = sum((x - avg) ** 2 for x in scores) / len(scores)  # 母集団分散
+        sec_avg[sec] = avg
+        sec_std[sec] = var ** 0.5
     meta = {p["ticker"]: p for p in pool}
 
     def attach(it):
@@ -169,6 +177,16 @@ def _attach_rankings(items, excluded, pool):
         it["sector_rank"] = sec_rank.get(t)
         it["sector_count"] = sec_count.get(t)
         it["rs_pct"] = _top_pct(rs_rank[t], n_rs) if t in rs_rank else None
+        # v21: セクター中立スコア（表示のみ・score/順位は変更しない）
+        sec = it.get("sector")
+        avg = sec_avg.get(sec)
+        if avg is not None:
+            it["sector_avg"] = round(avg, 1)
+            it["sector_neutral"] = round(it["score"] - avg, 1)
+            std = sec_std.get(sec) or 0
+            it["sector_z"] = round((it["score"] - avg) / std, 2) if std > 0 else None
+        else:
+            it["sector_avg"] = it["sector_neutral"] = it["sector_z"] = None
         # リーダー判定（セクター内の相対位置）
         sr, sc = it.get("sector_rank"), it.get("sector_count") or 1
         if sr:
