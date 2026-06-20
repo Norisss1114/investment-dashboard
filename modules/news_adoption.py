@@ -114,9 +114,14 @@ def build_candidates(records=None):
 #   score_correction(v29): target/recommended_score/delta/reason
 #   simulation_result(v31): source/verdict/approved_correction_count/applicable_news/
 #                           eligible_n/before/after/improvement/reasons
+#   production_apply_candidate(v41): experiment_applied/target_count/score_changed/rank_changed/
+#                           in_count/out_count/guard_decision/overrides_enabled/summary/rows/note
 _OPTIONAL_FIELDS = ("target", "recommended_score", "delta", "reason",
                     "source", "verdict", "approved_correction_count", "applicable_news",
-                    "eligible_n", "before", "after", "improvement", "reasons")
+                    "eligible_n", "before", "after", "improvement", "reasons",
+                    "experiment_applied", "target_count", "score_changed", "rank_changed",
+                    "in_count", "out_count", "guard_decision", "overrides_enabled",
+                    "summary", "rows", "note")
 
 
 def _upsert(cand):
@@ -1058,3 +1063,78 @@ def preview_discovery_ranking_experiment(items, cfg=None, experiment_enabled=Fal
         "experiment_applied": applied, "reason": reason,
         "total": n, "score_changed": score_changed, "rank_changed": rank_changed,
         "in_count": in_count, "out_count": out_count, "rows": rows}
+
+
+# ---------------- v41: 実験ランキング結果を本番反映候補として保存（保存のみ・本番非反映） ----------------
+def _production_apply_cand_id():
+    """production_apply_candidate の固定id（1件集約・最新で上書き）。"""
+    return "production_apply_candidate|news_overrides"
+
+
+def _production_apply_summary(rows):
+    """v40 rows から summary を算出（rows 空でも落ちない）。"""
+    rows = rows or []
+    if not rows:
+        return {"top10_changed": 0, "avg_score_delta": 0.0, "max_rank_up": 0, "max_rank_down": 0}
+    top10_changed = sum(1 for r in rows
+                        if ((r.get("original_rank") or 999) <= 10 or (r.get("experiment_rank") or 999) <= 10)
+                        and r.get("status") != "変化なし")
+    deltas = [r.get("score_delta", 0) or 0 for r in rows]
+    avg_score_delta = round(sum(deltas) / len(deltas), 1) if deltas else 0.0
+    rank_deltas = [r.get("rank_delta", 0) or 0 for r in rows]
+    return {"top10_changed": top10_changed, "avg_score_delta": avg_score_delta,
+            "max_rank_up": max(rank_deltas), "max_rank_down": min(rank_deltas)}
+
+
+def production_apply_savable(exp_result, candidates=None):
+    """保存条件の判定（views のボタン表示と save 内で共用）。返り値 (ok, reason)。"""
+    e = exp_result or {}
+    if not e.get("experiment_applied"):
+        return False, "実験が未適用です（experiment_applied=false）"
+    if e.get("enabled") is not True:
+        return False, "overrides enabled=false です"
+    cands = candidates if candidates is not None else load()
+    if production_guard(cands)["decision"] != "反映準備OK":
+        return False, "本番反映前チェックが「反映準備OK」ではありません"
+    if (e.get("score_changed") or 0) < 1:
+        return False, "score 変化が0件です"
+    if (e.get("rank_changed") or 0) < 1:
+        return False, "順位変化が0件です"
+    if (e.get("out_count") or 0) > (e.get("in_count") or 0) + 2:
+        return False, f"OUTが多すぎます（out {e.get('out_count')} > in {e.get('in_count')}+2）"
+    return True, "保存条件を満たしています"
+
+
+def save_production_apply_candidate(exp_result):
+    """v40 preview_discovery_ranking_experiment() 結果を production_apply_candidate として保存（固定id）。
+    保存条件を満たさなければ保存せず (False, 理由)。承認/却下 status は再保存でも保持。
+    ⚠️ 承認しても本番ニューススコア・発掘スコア・ランキングには反映しない（status 変更のみ）。"""
+    e = exp_result or {}
+    ok, reason = production_apply_savable(e)
+    if not ok:
+        return False, reason
+
+    rows = [{
+        "ticker": r.get("ticker"), "original_rank": r.get("original_rank"),
+        "experiment_rank": r.get("experiment_rank"), "rank_delta": r.get("rank_delta"),
+        "original_score": r.get("original_score"), "experiment_score": r.get("experiment_score"),
+        "score_delta": r.get("score_delta"), "status": r.get("status"),
+    } for r in (e.get("rows") or [])]
+
+    cand = {
+        "id": _production_apply_cand_id(), "type": "production_apply_candidate",
+        "label": "news_overrides", "suggestion": "production_apply_candidate",
+        "evidence": {}, "confidence": None,
+        "source": "discovery_ranking_experiment",
+        "experiment_applied": bool(e.get("experiment_applied")),
+        "target_count": e.get("total"),
+        "score_changed": e.get("score_changed"), "rank_changed": e.get("rank_changed"),
+        "in_count": e.get("in_count"), "out_count": e.get("out_count"),
+        "guard_decision": production_guard(load())["decision"],
+        "overrides_enabled": bool(e.get("enabled")),
+        "summary": _production_apply_summary(rows),
+        "rows": rows,
+        "note": "Saved only. Not applied to production ranking.",
+    }
+    created = _upsert(cand)
+    return True, ("保存しました（新規）" if created else "更新しました（既存candidate/承認状態は保持）")

@@ -1059,7 +1059,22 @@ def _render_news_adoption():
             ev = c.get("evidence", {}) or {}
             color = _NADOPT_STATUS_COLOR.get(c.get("status"), "#64748b")
             n_val = ev.get("n", ev.get("sample_size"))  # v29=n / v27.2=sample_size
-            if c.get("type") == "simulation_result":
+            if c.get("type") == "production_apply_candidate":
+                # v41: 本番反映候補（発掘ランキング実験結果の控え）
+                summ = c.get("summary", {}) or {}
+                st.markdown(
+                    f'<div style="font-size:0.95rem;">'
+                    f'<b>[production_apply_candidate]</b> {c.get("source")}'
+                    f'　<b style="color:{color};">{c.get("status")}</b></div>',
+                    unsafe_allow_html=True)
+                st.caption(
+                    f'対象 {c.get("target_count")} / score変化 {c.get("score_changed")} / '
+                    f'順位変化 {c.get("rank_changed")} / IN {c.get("in_count")} / OUT {c.get("out_count")} ｜ '
+                    f'guard {c.get("guard_decision")} / overrides_enabled {str(c.get("overrides_enabled")).lower()} ｜ '
+                    f'top10変化 {summ.get("top10_changed")} / avgΔ {summ.get("avg_score_delta")} / '
+                    f'最大上昇 {summ.get("max_rank_up")} / 最大下落 {summ.get("max_rank_down")} ｜ '
+                    f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
+            elif c.get("type") == "simulation_result":
                 # v31: シミュレーション結果行（verdict/improvement/規模を表示）
                 imp = c.get("improvement", {}) or {}
 
@@ -2683,6 +2698,16 @@ def _render_discovery_ranking_experiment(top20):
 
     st.info("これは発掘ランキングの実験プレビューのみです。本番ランキングには反映していません。")
     st.caption("近似：impact_overrides のみ反映。category補正とaction再計算は未反映です。")
+
+    # 📌 v41: 条件成立時のみ「本番反映候補」として保存（本番非反映・status控えのみ）
+    ok, why = nadopt_mod.production_apply_savable(p)
+    if ok:
+        if st.button("📌 実験ランキング結果を本番反映候補に保存", key="prod_apply_save", width='stretch'):
+            done, msg = nadopt_mod.save_production_apply_candidate(p)
+            (st.success if done else st.warning)(msg + "（※本番ランキングには反映しません）")
+        st.caption("保存結果は下の「📋 ニュース採用候補」に production_apply_candidate として表示されます。")
+    else:
+        st.caption(f"保存条件未達のため保存ボタンは非表示：{why}")
 
 
 # ================================================================== v8.5: Moomoo同期
