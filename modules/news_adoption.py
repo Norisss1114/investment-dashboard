@@ -14,6 +14,8 @@ v27.1 の news_calibration.analytics()/recommendation() が出す
 候補抽出は recommendation()/analytics() の構造化データから組み立てる（文字列パースしない）。
 """
 import datetime as dt
+import hashlib
+import json
 import os
 
 from modules import storage, news_calibration as ncal
@@ -124,7 +126,9 @@ _OPTIONAL_FIELDS = ("target", "recommended_score", "delta", "reason",
                     "eligible_n", "before", "after", "improvement", "reasons",
                     "experiment_applied", "target_count", "score_changed", "rank_changed",
                     "in_count", "out_count", "guard_decision", "overrides_enabled",
-                    "summary", "rows", "note")
+                    "summary", "rows", "note",
+                    # production_apply_candidate(v43): fingerprint 整合性
+                    "overrides_fingerprint", "overrides_fingerprint_source")
 
 
 def _upsert(cand):
@@ -552,6 +556,23 @@ def load_overrides_config():
     """生成済み overrides を読む（表示用）。無ければ None。"""
     cfg = storage.load_json(OVERRIDES_PATH, None)
     return cfg if isinstance(cfg, dict) else None
+
+
+# ---------------- v43: overrides の内容 fingerprint（整合性チェック用） ----------------
+def overrides_fingerprint(cfg):
+    """overrides の「設定内容」のみを正規化して sha256 fingerprint を返す。
+    対象は impact_overrides / category_adjustments / sentiment_notes の3キーのみ
+    （generated_at / simulation_summary / enabled / source / guard_decision は含めない）。
+    cfg が dict でなければ None。キー順序差は sort_keys で吸収される。"""
+    if not isinstance(cfg, dict):
+        return None
+    payload = {
+        "impact_overrides": cfg.get("impact_overrides") or {},
+        "category_adjustments": cfg.get("category_adjustments") or {},
+        "sentiment_notes": cfg.get("sentiment_notes") or {},
+    }
+    normalized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 # ---------------- v35: overrides の状態を返す（読むだけ・適用しない） ----------------
@@ -1138,6 +1159,9 @@ def save_production_apply_candidate(exp_result):
         "summary": _production_apply_summary(rows),
         "rows": rows,
         "note": "Saved only. Not applied to production ranking.",
+        # v43: 承認時点の overrides 設定内容の fingerprint（整合性チェック用）
+        "overrides_fingerprint": overrides_fingerprint(load_overrides_config()),
+        "overrides_fingerprint_source": "news_score_overrides.json",
     }
     created = _upsert(cand)
     return True, ("保存しました（新規）" if created else "更新しました（既存candidate/承認状態は保持）")
@@ -1171,9 +1195,9 @@ def _overrides_freshness_ok(cfg):
 
 def get_production_overrides_status():
     """本番反映の全ゲートを評価して allow/gates/reasons/summary を返す（判定のみ・副作用なし）。
-    ⚠️ apply パスは存在しない（v42）。本番ニューススコア・発掘スコア・ランキングには一切反映しない。
-    PRODUCTION_NEWS_OVERRIDES_ENABLED が False の限り allow は必ず False。
-    consistency(fingerprint) は v42 では未実装＝必ず NG なので allow は決して True にならない。"""
+    ⚠️ apply パスは存在しない（v43時点）。本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    consistency(fingerprint) は v43 で実判定化（current overrides ↔ approved candidate の一致）。
+    ただし PRODUCTION_NEWS_OVERRIDES_ENABLED が False（OFF固定）の限り allow は必ず False。"""
     cands = load()
     cfg = load_overrides_config()
 
@@ -1186,7 +1210,28 @@ def get_production_overrides_status():
     g_approved = any(c.get("type") == "production_apply_candidate" and c.get("status") == "approved"
                      for c in cands)
     g_fresh = _overrides_freshness_ok(cfg) if g_exists else False
-    g_consistency = False  # v42: fingerprint 未実装のため必ず NG
+
+    # v43: fingerprint 整合性判定（current overrides ↔ approved candidate）
+    approved_cand = next((c for c in cands if c.get("type") == "production_apply_candidate"
+                          and c.get("status") == "approved"), None)
+    current_fp = overrides_fingerprint(cfg)
+    candidate_fp = approved_cand.get("overrides_fingerprint") if approved_cand else None
+    consistency_reason = None
+    if not approved_cand:
+        g_consistency = False
+        consistency_reason = "approved production_apply_candidate missing"
+    elif not candidate_fp:
+        g_consistency = False
+        consistency_reason = "fingerprint未保存。v43以降に候補を再保存してください"
+    elif current_fp is None:
+        g_consistency = False
+        consistency_reason = "overrides file missing"
+    elif current_fp == candidate_fp:
+        g_consistency = True
+    else:
+        g_consistency = False
+        consistency_reason = "overrides の内容が承認時と不一致です"
+    fingerprint_match = bool(current_fp and candidate_fp and current_fp == candidate_fp)
 
     gates = [
         {"label": "Global production switch", "ok": g_switch, "value": PRODUCTION_NEWS_OVERRIDES_ENABLED},
@@ -1197,7 +1242,7 @@ def get_production_overrides_status():
         {"label": "Approved production_apply_candidate", "ok": g_approved, "value": g_approved},
         {"label": "Overrides freshness (<=72h)", "ok": g_fresh,
          "value": (cfg or {}).get("generated_at") if g_exists else None},
-        {"label": "Fingerprint consistency", "ok": g_consistency, "value": "未実装"},
+        {"label": "Fingerprint consistency", "ok": g_consistency, "value": fingerprint_match},
     ]
 
     reasons = []
@@ -1215,10 +1260,10 @@ def get_production_overrides_status():
         reasons.append("approved production_apply_candidate missing")
     if not g_fresh:
         reasons.append("overrides generated_at is stale")
-    if not g_consistency:
-        reasons.append("fingerprint consistency check is not implemented yet")
+    if not g_consistency and consistency_reason:
+        reasons.append(consistency_reason)
 
-    allow = all(g["ok"] for g in gates)  # consistency が必ず False のため v42 では常に False
+    allow = all(g["ok"] for g in gates)  # switch が OFF固定のため v43 でも常に False
 
     summary = {
         "production_switch": PRODUCTION_NEWS_OVERRIDES_ENABLED,
@@ -1229,6 +1274,11 @@ def get_production_overrides_status():
         "approved_candidate_exists": g_approved,
         "freshness_ok": g_fresh,
         "consistency_ok": g_consistency,
+        "current_fingerprint": current_fp,
+        "candidate_fingerprint": candidate_fp,
+        "fingerprint_match": fingerprint_match,
         "allow": allow,
     }
-    return {"allow": allow, "gates": gates, "reasons": reasons, "summary": summary}
+    return {"allow": allow, "gates": gates, "reasons": reasons, "summary": summary,
+            "current_fingerprint": current_fp, "candidate_fingerprint": candidate_fp,
+            "fingerprint_match": fingerprint_match}

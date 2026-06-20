@@ -1162,12 +1162,26 @@ def _render_production_overrides_status():
         mark = "✅" if g["ok"] else "❌"
         st.markdown(f'{mark} {g["label"]}：{g["value"]}')
 
+    # 🔑 v43: fingerprint 整合性
+    def _short(fp):
+        return (fp[:12] if isinstance(fp, str) and fp else "—")
+    cur = s.get("current_fingerprint")
+    cand = s.get("candidate_fingerprint")
+    match = s.get("fingerprint_match")
+    st.markdown("**fingerprint 整合性**")
+    st.markdown(f'- current overrides fingerprint：`{_short(cur)}`')
+    st.markdown(f'- candidate fingerprint：`{_short(cand)}`')
+    st.markdown(f'- fingerprint match：**{match}**')
+    st.markdown(f'- consistency gate：**{"✅ OK" if s["summary"]["consistency_ok"] else "❌ NG"}**')
+    if not cand:
+        st.caption("※承認済み候補に fingerprint が未保存です。v43以降に候補を再保存してください。")
+
     if s["reasons"]:
         st.markdown("**ブロック理由**")
         for r in s["reasons"]:
             st.caption("・" + r)
 
-    st.info("v42では本番適用関数は存在しません。これは状態表示のみです。"
+    st.info("v43時点でも本番適用関数は存在しません。これは状態表示のみです。"
             "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
 
