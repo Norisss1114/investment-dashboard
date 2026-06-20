@@ -1627,10 +1627,51 @@ def _render_production_data_creation_plan():
                    "overrides.enabled=true）が前提です。前段を完了すると作成可能になります。"
                    "本番ON（スイッチ変更）はまだ行いません。")
 
-    st.info("v55 では Step1〜Step7（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認・運用確認フラグ作成）まで実行できます。"
+    # 📊 v56: Step8（confirm_readiness）は read-only の最終監査表示のみ（ボタン/書込なし・本番ON導線なし）。
+    #    既存の read-only 関数を読むだけ。JSON は一切書き換えない。本番スイッチには触れない。
+    st.markdown("**Step8: readiness 最終確認（read-only・本番ONはしません）**")
+    _rc56 = nadopt_mod.production_on_readiness_check()
+    _ck56 = nadopt_mod.production_data_checklist()
+    _sm56 = nadopt_mod.get_production_overrides_status().get("summary", {}) or {}
+    _ov56 = _ck56.get("overrides", {}) or {}
+    _cd56 = _ck56.get("candidates", {}) or {}
+    _fl56 = _ck56.get("flags", {}) or {}
+    _ready56 = _rc56.get("ready_for_switch_on")
+    _opready56 = _ck56.get("operation_ready")
+    _color56 = "#16a34a" if _ready56 else "#dc2626"
+    st.markdown(
+        f'ready_for_switch_on：<b style="color:{_color56};font-size:1.05rem;">{_ready56}</b>'
+        f'　／　operation_ready：<b>{_opready56}</b>　／　allow：<b>{_sm56.get("allow")}</b>',
+        unsafe_allow_html=True)
+    st.caption(
+        f"本番スイッチ PRODUCTION_NEWS_OVERRIDES_ENABLED：{nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED}"
+        "（False＝本番OFF・変更しません。allow は switch OFF のため false のまま）")
+
+    _mark56 = {"done": "✅", "todo": "⬜", "blocked": "🔒"}
+    st.caption("Step1〜Step8 の状態：" + " ／ ".join(
+        f'{i}.{_mark56.get(s.get("status"), "・")}{s.get("id")}'
+        for i, s in enumerate(plan["steps"], 1)))
+
+    st.caption(
+        f"overrides.enabled：{_ov56.get('enabled')}"
+        f" ／ approved_production_apply_candidate：{_cd56.get('approved_production_apply_candidate', 0)}"
+        f" ／ fingerprint_match：{_sm56.get('fingerprint_match')}"
+        f" ／ freshness_ok：{_sm56.get('freshness_ok')}"
+        f" ／ production_apply_confirmed：{_fl56.get('production_apply_confirmed')}")
+
+    if _rc56.get("blocking_reasons"):
+        st.markdown("**未充足項目（blocking_reasons）**")
+        for _r56 in _rc56["blocking_reasons"]:
+            st.caption("・" + _r56)
+
+    st.info("これは本番ON前の最終監査表示のみです（read-only）。"
+            "**本番スイッチ・本番ニューススコア・発掘スコア・ランキングには一切触れません。**"
+            "本番ON（PRODUCTION_NEWS_OVERRIDES_ENABLED を True にする）は別判断・別PRで慎重に行います。")
+
+    st.info("v56 では Step1〜Step7（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認・運用確認フラグ作成）まで実行でき、Step8 は readiness 最終確認（read-only）です。"
             "**candidates / 較正データ / overrides / flags JSON のみ更新し、本番スコア・発掘ランキング・本番スイッチには一切触れません。**"
             "score_correction の承認は「📋 ニュース採用候補」で個別に行ってください。"
-            "Step8（readiness 確認）・本番ON（スイッチ変更）は既存UIまたは手動・別判断で行ってください。")
+            "本番ON（スイッチ変更）は既存UIまたは手動・別判断で行ってください。")
 
 
 # ============================================================ 個別銘柄分析
