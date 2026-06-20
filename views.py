@@ -1439,6 +1439,57 @@ def _render_production_data_creation_plan():
                    "enabled=true 化（Step5 完了）は別判断・別PRです。preview/fingerprint/freshness の詳細は "
                    "上の「📝 ニューススコア設定ファイル生成」セクションで確認できます。")
 
+    # 🔓 v53: overrides.enabled トグル（enabled キーのみ変更・二重確認・ロールバック付き）。
+    #    ⚠️ news_score_overrides.json の enabled フラグのみ書き換える。generate_overrides_config は呼ばない。
+    #    本番グローバルスイッチ / 本番スコア / 発掘ランキング / flags / production_apply_candidate には一切触れない。
+    _ov53 = nadopt_mod.load_overrides_config()
+    _switch_off53 = (nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED is False)
+    _appr_sim53 = sum(1 for c in nadopt_mod.list_all()
+                      if c.get("type") == "simulation_result" and c.get("status") == "approved")
+    if isinstance(_ov53, dict) and _switch_off53 and _appr_sim53 >= 1:
+        st.markdown("**Step5+: overrides を有効化 / 無効化（enabled フラグのみ）**")
+        _sum53 = nadopt_mod.get_production_overrides_status().get("summary", {}) or {}
+        _cur_enabled53 = bool(_ov53.get("enabled"))
+        st.caption(
+            f"本番スイッチ PRODUCTION_NEWS_OVERRIDES_ENABLED：{nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED}"
+            "（別レイヤ・変更しません） ／ overrides 存在：true"
+            f" ／ 現在 enabled：{str(_cur_enabled53).lower()}")
+        st.caption(
+            f"current_fingerprint：{_sum53.get('current_fingerprint') or '—'}"
+            f" ／ freshness_ok：{_sum53.get('freshness_ok')}"
+            f" ／ 承認済 simulation_result：{_appr_sim53} 件")
+        st.caption("⚠️ これは overrides ファイルの **enabled キーのみ**を変更します。"
+                   "generated_at / impact / category / sentiment / fingerprint は変更しません。"
+                   "本番スイッチ・本番スコア・発掘ランキング・flags・production_apply_candidate には触れません。"
+                   "enabled=true でも本番スイッチ(False)のため本番には反映されません（本番ONは別PR）。")
+
+        def _set_overrides_enabled53(flag):
+            """overrides の enabled キーのみ true/false に変更して保存（他キーは保持・再生成しない）。"""
+            from modules import storage as _storage53
+            cfg = nadopt_mod.load_overrides_config()
+            if not isinstance(cfg, dict):
+                return False, "overrides が読み込めません"
+            cfg["enabled"] = bool(flag)  # enabled キーのみ変更（他キーは一切触らない）
+            ok = _storage53.save_json(nadopt_mod.OVERRIDES_PATH, cfg)
+            return ok, ("enabled を更新しました" if ok else "保存に失敗しました")
+
+        if not _cur_enabled53:
+            _chk_on53 = st.checkbox("内容を確認した（enabled=true 化）", key="ov_enable_confirm53")
+            if st.button("🔓 enabled=true にする", key="ov_enable_btn53",
+                         width='stretch', disabled=not _chk_on53):
+                ok, msg = _set_overrides_enabled53(True)
+                (st.success if ok else st.warning)(msg + "（※本番スコア・ランキングには反映しません）")
+                if ok:
+                    st.rerun()
+        else:
+            _chk_off53 = st.checkbox("内容を確認した（enabled=false に戻す）", key="ov_disable_confirm53")
+            if st.button("🔒 enabled=false に戻す（ロールバック）", key="ov_disable_btn53",
+                         width='stretch', disabled=not _chk_off53):
+                ok, msg = _set_overrides_enabled53(False)
+                (st.success if ok else st.warning)(msg + "（安全側へロールバックしました）")
+                if ok:
+                    st.rerun()
+
     # 🔒 v52: Step6（approve_production_apply_candidate）は案内表示のみ（実行導線なし）。
     #    overrides.enabled=true が前提だが、本フローは enabled=false 固定のため Step6 は実行不可。
     #    保存/承認/flags/enabled 操作は一切しない。enabled=true 化は別PR・別判断。
