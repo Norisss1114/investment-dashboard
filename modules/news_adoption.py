@@ -107,20 +107,29 @@ def build_candidates(records=None):
 
 
 # ---------------- 追加（dedup・status保持） ----------------
+# score_correction(v29) で追加される任意フィールド。存在する時だけ保存/更新する
+# （v27.2 候補はこれらを持たないので shape は不変）。
+_OPTIONAL_FIELDS = ("target", "recommended_score", "delta", "reason")
+
+
 def _upsert(cand):
-    """候補1件を upsert。既存(同一id)は evidence/confidence/suggestion/updated_at を更新、
+    """候補1件を upsert。既存(同一id)は evidence/confidence/suggestion(+任意field)/updated_at を更新、
     status(approved/rejected) は保持。返り値 (created:bool)。"""
     recs = load()
     now = _now()
     existing = next((r for r in recs if r.get("id") == cand["id"]), None)
     if existing is None:
-        recs.append({
+        rec = {
             "id": cand["id"], "type": cand["type"], "label": cand["label"],
             "suggestion": cand["suggestion"], "current_score": cand.get("current_score"),
             "evidence": cand["evidence"], "confidence": cand.get("confidence"),
             "status": "candidate", "created_at": now, "updated_at": now,
             "approved_at": None, "rejected_at": None, "note": "",
-        })
+        }
+        for f in _OPTIONAL_FIELDS:
+            if f in cand:
+                rec[f] = cand[f]
+        recs.append(rec)
         save(recs)
         return True
     # 既存は内容だけ更新。status と日時(created/approved/rejected)は保持。
@@ -129,6 +138,9 @@ def _upsert(cand):
     existing["evidence"] = cand["evidence"]
     existing["confidence"] = cand.get("confidence")
     existing["updated_at"] = now
+    for f in _OPTIONAL_FIELDS:
+        if f in cand:
+            existing[f] = cand[f]
     save(recs)
     return False
 
@@ -178,3 +190,77 @@ def remove(cid):
 def clear():
     save([])
     return True
+
+
+# ---------------- v29: ニューススコア補正案の検証候補化（保存のみ・本番非反映） ----------------
+# 保存する sentiment 評価（示唆あり）。neutral妥当 / 信頼度低 / 要確認は保存しない。
+_SENTIMENT_SAVE = ("bull信頼度 高", "bear信頼度 高", "neutral過小評価", "neutral弱い")
+
+
+def _score_cand_id(target, label):
+    """score_correction の安定キー。例 'score_correction|impact|5'。"""
+    return f"score_correction|{target}|{label}"
+
+
+def _score_evidence(row):
+    """v28 補正案の行から evidence を作る（キーは n で統一）。"""
+    return {
+        "n": row.get("n"),
+        "avg_ret30": row.get("avg_ret30"),
+        "avg_vs_spy30": row.get("avg_vs_spy30"),
+        "win_rate": row.get("win_rate"),
+    }
+
+
+def build_score_corrections(records=None):
+    """v28 correction_proposals() から score_correction 候補を組み立てる。
+    n>=5・delta!=0 は v28 側で既にフィルタ済み。sentiment は示唆ありのみ保存。"""
+    cp = ncal.correction_proposals(records)
+    confidence = cp.get("confidence", "低")
+    out = []
+
+    def _mk(target, id_key, label, suggestion, reason, row,
+            current_score=None, recommended_score=None, delta=None):
+        out.append({
+            "id": _score_cand_id(target, id_key), "type": "score_correction",
+            "target": target, "label": label,
+            "current_score": current_score, "recommended_score": recommended_score, "delta": delta,
+            "suggestion": suggestion, "reason": reason,
+            "evidence": _score_evidence(row), "confidence": confidence,
+        })
+
+    # impact 補正（v28: n>=5 & delta!=0 のみ含まれる）。id は score の実値、label は impactN。
+    for p in cp.get("impact", []):
+        cur = p.get("current_score")
+        label = f"impact{cur}"
+        suggestion = "過小評価の可能性" if p["delta"] > 0 else "過大評価の可能性"
+        _mk("impact", cur, label, suggestion, p.get("reason", ""), p,
+            current_score=cur, recommended_score=p.get("recommended_score"), delta=p.get("delta"))
+
+    # sentiment 評価（示唆ありのみ。数値 score は None）。id/label は sentiment 名。
+    for p in cp.get("sentiment", []):
+        if p.get("evaluation") not in _SENTIMENT_SAVE:
+            continue
+        _mk("sentiment", p["label"], p["label"], p.get("evaluation", ""), p.get("reason", ""), p)
+
+    # category 補正（v28: n>=5 & ±1 のみ。current/recommended は None、delta に ±1）。
+    for p in cp.get("category", []):
+        corr = p.get("correction")
+        if corr not in (1, -1):
+            continue
+        suggestion = "+1 補正候補" if corr == 1 else "-1 補正候補"
+        _mk("category", p["label"], p["label"], suggestion, p.get("reason", ""), p, delta=corr)
+
+    return out
+
+
+def save_score_corrections(records=None):
+    """build_score_corrections の結果をまとめて保存（dedup）。返り値 (total, created, updated)。"""
+    cands = build_score_corrections(records)
+    created = updated = 0
+    for c in cands:
+        if _upsert(c):
+            created += 1
+        else:
+            updated += 1
+    return len(cands), created, updated

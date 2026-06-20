@@ -656,6 +656,16 @@ def _render_news_score_corrections():
     st.info("これは表示のみで、本番ニューススコアには反映していません。"
             "サンプルが少ない場合は採用しないでください。")
 
+    # 📌 v29: 補正案を検証候補として保存（本番非反映）
+    if st.button("📌 補正案を検証候補に保存", key="nscore_save", width='stretch'):
+        total, created, updated = nadopt_mod.save_score_corrections()
+        if total == 0:
+            st.info("保存できる補正案（n≥5・delta≠0・示唆あり）がありませんでした。")
+        else:
+            st.success(f"補正案 {total} 件を検証候補に保存しました（新規 {created} / 更新 {updated}）。"
+                       "※本番スコアには反映しません。")
+    st.caption("保存した補正案は下の「📋 ニュース採用候補」に score_correction として表示されます。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
@@ -684,20 +694,45 @@ def _render_news_adoption():
         for c in sorted(cands, key=lambda x: (order.get(x.get("status"), 9), x.get("type", ""), x.get("label", ""))):
             ev = c.get("evidence", {}) or {}
             color = _NADOPT_STATUS_COLOR.get(c.get("status"), "#64748b")
-            cs = c.get("current_score")
-            st.markdown(
-                f'<div style="font-size:0.95rem;">'
-                f'<b>[{c.get("type")}]</b> {c.get("label")} '
-                f'— {c.get("suggestion")}'
-                + (f'（現score {cs}）' if cs is not None else "")
-                + f'　<b style="color:{color};">{c.get("status")}</b></div>',
-                unsafe_allow_html=True)
-            st.caption(
-                f'ret7 {_f(ev.get("avg_ret7"))} / ret30 {_f(ev.get("avg_ret30"))} / '
-                f'vsSPY30 {_f(ev.get("avg_vs_spy30"))} / '
-                f'勝率 {ev.get("win_rate") if ev.get("win_rate") is not None else "—"}% / '
-                f'n={ev.get("sample_size")} ｜ 信頼度 {c.get("confidence","—")} ｜ '
-                f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
+            n_val = ev.get("n", ev.get("sample_size"))  # v29=n / v27.2=sample_size
+            if c.get("type") == "score_correction":
+                # v29: score_correction 行（target/推奨score/delta を表示）
+                cs = c.get("current_score")
+                rs = c.get("recommended_score")
+                delta = c.get("delta")
+                head = f'<b>[score_correction/{c.get("target")}]</b> {c.get("label")} — {c.get("suggestion")}'
+                if cs is not None and rs is not None:
+                    head += f'（{cs} → {rs}'
+                    head += (f'・delta {delta:+d}）' if isinstance(delta, int) else '）')
+                elif isinstance(delta, int):
+                    head += f'（補正 {delta:+d}）'
+                st.markdown(
+                    f'<div style="font-size:0.95rem;">{head}'
+                    f'　<b style="color:{color};">{c.get("status")}</b></div>',
+                    unsafe_allow_html=True)
+                if c.get("reason"):
+                    st.caption("根拠: " + c["reason"])
+                st.caption(
+                    f'ret30 {_f(ev.get("avg_ret30"))} / vsSPY30 {_f(ev.get("avg_vs_spy30"))} / '
+                    f'勝率 {ev.get("win_rate") if ev.get("win_rate") is not None else "—"}% / '
+                    f'n={n_val} ｜ 信頼度 {c.get("confidence","—")} ｜ '
+                    f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
+            else:
+                # v27.2: 既存候補（impact_adjustment / sentiment / category）
+                cs = c.get("current_score")
+                st.markdown(
+                    f'<div style="font-size:0.95rem;">'
+                    f'<b>[{c.get("type")}]</b> {c.get("label")} '
+                    f'— {c.get("suggestion")}'
+                    + (f'（現score {cs}）' if cs is not None else "")
+                    + f'　<b style="color:{color};">{c.get("status")}</b></div>',
+                    unsafe_allow_html=True)
+                st.caption(
+                    f'ret7 {_f(ev.get("avg_ret7"))} / ret30 {_f(ev.get("avg_ret30"))} / '
+                    f'vsSPY30 {_f(ev.get("avg_vs_spy30"))} / '
+                    f'勝率 {ev.get("win_rate") if ev.get("win_rate") is not None else "—"}% / '
+                    f'n={n_val} ｜ 信頼度 {c.get("confidence","—")} ｜ '
+                    f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
             b = st.columns(3)
             if b[0].button("✅ 承認", key=f'nadopt_app_{c["id"]}', width='stretch'):
                 nadopt_mod.approve(c["id"]); st.rerun()
