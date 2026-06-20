@@ -1333,6 +1333,7 @@ def _render_production_data_creation_plan():
     steps = {s["id"]: s for s in plan["steps"]}
     s1, s2 = steps.get("save_calibration", {}), steps.get("update_returns", {})
     s3, s4 = steps.get("approve_score_correction", {}), steps.get("approve_simulation_result", {})
+    s5 = steps.get("generate_overrides", {})
 
     if s1.get("safe_to_run"):
         st.markdown("**Step1: ニュース較正データを保存**")
@@ -1413,9 +1414,34 @@ def _render_production_data_creation_plan():
                 st.success("simulation_result を承認しました（status 変更のみ・本番スコアには反映しません）。")
                 st.rerun()
 
-    st.info("v51-B では Step1〜Step4（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認）まで実行できます。"
-            "**candidates / 較正データJSONのみ更新し、本番スコア・発掘ランキング・overrides・flags・スイッチには一切触れません。**"
-            "score_correction の承認は「📋 ニュース採用候補」で個別に、Step5以降は既存UIまたは手動で実行してください。")
+    # 🟢 v51-C: Step5（generate_overrides）は案A＝生成ボタンのみ。enabled は操作しない（既存仕様で常に false）。
+    #    enabled=true 化（Step5 完了）は別判断・別PR。production_apply_candidate / flags は作らない。
+    if s5.get("safe_to_run"):
+        st.markdown("**Step5: ニューススコア設定ファイル(overrides)を生成**")
+        _gok, _greason = nadopt_mod.can_generate_overrides()
+        st.caption(f"生成可否：{'✅ 生成可能' if _gok else '❌ 生成不可'}（{_greason}）")
+        if _gok:
+            if st.button("📝 Step5: news_score_overrides.json を生成", key="calib_flow_ov_gen", width='stretch'):
+                done, msg, cfg = nadopt_mod.generate_overrides_config()
+                if done:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+        _ov = nadopt_mod.load_overrides_config()
+        if _ov:
+            st.caption(f'生成済み：generated_at {_ov.get("generated_at","—")} ／ '
+                       f'enabled={str(_ov.get("enabled")).lower()} ／ '
+                       f'impact {len(_ov.get("impact_overrides",{}))} ／ '
+                       f'category {len(_ov.get("category_adjustments",{}))} ／ '
+                       f'sentiment {len(_ov.get("sentiment_notes",{}))}')
+        st.caption("⚠️ 生成しても **enabled=false のまま**で、本番には反映しません。"
+                   "enabled=true 化（Step5 完了）は別判断・別PRです。preview/fingerprint/freshness の詳細は "
+                   "上の「📝 ニューススコア設定ファイル生成」セクションで確認できます。")
+
+    st.info("v51-C では Step1〜Step5（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成）まで実行できます。"
+            "**candidates / 較正データ / overrides(enabled=false) JSON のみ更新し、本番スコア・発掘ランキング・flags・スイッチには一切触れません。**"
+            "score_correction の承認は「📋 ニュース採用候補」で個別に、Step6以降は既存UIまたは手動で実行してください。")
 
 
 # ============================================================ 個別銘柄分析
