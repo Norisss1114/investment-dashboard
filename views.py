@@ -1553,10 +1553,84 @@ def _render_production_data_creation_plan():
                    "PRODUCTION_NEWS_OVERRIDES_ENABLED（False固定）とは**別レイヤ**です。"
                    "・本番ON（スイッチ変更）はまだ行いません。")
 
-    st.info("v54 では Step1〜Step6（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認）まで実行できます。"
-            "**candidates / 較正データ / overrides JSON のみ更新し、本番スコア・発掘ランキング・flags・本番スイッチには一切触れません。**"
+    # 🟢 v55: Step7（create_flags）は案B＝二重確認付きで news_production_flags.json の
+    #    production_apply_confirmed のみ作成/ロールバック。書込は flags JSON の1キーのみ。
+    #    本番スイッチ / 本番スコア / 発掘ランキング / overrides / production_apply_candidate には一切触れない。
+    _s7 = steps.get("create_flags", {})
+    if _s7.get("safe_to_run"):
+        st.markdown("**Step7: 本番運用確認フラグ（production_apply_confirmed）**")
+        _chk55 = nadopt_mod.production_data_checklist()
+        _sum55 = nadopt_mod.get_production_overrides_status().get("summary", {}) or {}
+        _flags55 = _chk55.get("flags", {}) or {}
+        _ov55 = _chk55.get("overrides", {}) or {}
+        _cand55 = _chk55.get("candidates", {}) or {}
+        _rd55 = _chk55.get("readiness", {}) or {}
+        _cur_confirmed55 = bool(_flags55.get("production_apply_confirmed"))
+        st.caption(
+            f"本番スイッチ PRODUCTION_NEWS_OVERRIDES_ENABLED：{nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED}"
+            "（別レイヤ・変更しません） ／ "
+            f"approved_production_apply_candidate：{_cand55.get('approved_production_apply_candidate', 0)} 件")
+        st.caption(
+            f"fingerprint_match：{_sum55.get('fingerprint_match')} ／ "
+            f"overrides.enabled：{_ov55.get('enabled')} ／ "
+            f"freshness_ok：{_sum55.get('freshness_ok')}")
+        st.caption(
+            f"flags ファイル存在：{_flags55.get('exists')} ／ "
+            f"現在 production_apply_confirmed：{str(_cur_confirmed55).lower()} ／ "
+            f"readiness(ready_for_switch_on)：{_rd55.get('ready_for_switch_on')}")
+        st.caption("⚠️ これは flags JSON の **production_apply_confirmed キーのみ**を変更します。"
+                   "本番スイッチ・本番スコア・発掘ランキング・overrides・production_apply_candidate には触れません。"
+                   "production_apply_confirmed=true でも本番スイッチ(False)のため本番には反映されません（本番ONは別判断・別PR）。")
+
+        # 追加ガード：全て満たす時のみ作成ボタンを表示
+        _gate55 = (
+            nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED is False
+            and (_cand55.get("approved_production_apply_candidate", 0) or 0) >= 1
+            and _sum55.get("fingerprint_match") is True
+            and _ov55.get("enabled") is True
+            and _sum55.get("freshness_ok") is True
+        )
+
+        def _set_production_confirmed55(flag):
+            """news_production_flags.json の production_apply_confirmed のみ書き換え（ファイル削除しない）。"""
+            from modules import storage as _storage55
+            ok = _storage55.save_json(nadopt_mod.PRODUCTION_FLAGS_PATH,
+                                      {"production_apply_confirmed": bool(flag)})
+            return ok, ("flags を更新しました" if ok else "保存に失敗しました")
+
+        if not _cur_confirmed55:
+            if not _gate55:
+                st.warning("作成ガード未達です（approved候補≥1・fingerprint一致・enabled=true・freshness_ok・"
+                           "本番スイッチOFF を全て満たす必要があります）。上のステップを完了してください。")
+            else:
+                _chk_on55 = st.checkbox("内容を確認した（production_apply_confirmed=true を作成）",
+                                        key="flags_confirm_create55")
+                if st.button("📝 Step7: production_apply_confirmed=true を作成", key="flags_create_btn55",
+                             width='stretch', disabled=not _chk_on55):
+                    ok, msg = _set_production_confirmed55(True)
+                    (st.success if ok else st.warning)(msg + "（※本番スイッチ・本番スコアには反映しません）")
+                    if ok:
+                        st.rerun()
+        else:
+            _chk_off55 = st.checkbox("内容を確認した（production_apply_confirmed=false に戻す）",
+                                     key="flags_confirm_rollback55")
+            if st.button("↩ Step7: production_apply_confirmed=false に戻す（ロールバック）",
+                         key="flags_rollback_btn55", width='stretch', disabled=not _chk_off55):
+                ok, msg = _set_production_confirmed55(False)
+                (st.success if ok else st.warning)(msg + "（安全側へロールバック・ファイルは保持）")
+                if ok:
+                    st.rerun()
+
+    elif _s7.get("status") == "blocked":
+        st.markdown("**Step7: 本番運用確認フラグ（🔒 現状は実行不可）**")
+        st.warning("Step7 は Step6 まで（approved production_apply_candidate ≥1・fingerprint一致・"
+                   "overrides.enabled=true）が前提です。前段を完了すると作成可能になります。"
+                   "本番ON（スイッチ変更）はまだ行いません。")
+
+    st.info("v55 では Step1〜Step7（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認・運用確認フラグ作成）まで実行できます。"
+            "**candidates / 較正データ / overrides / flags JSON のみ更新し、本番スコア・発掘ランキング・本番スイッチには一切触れません。**"
             "score_correction の承認は「📋 ニュース採用候補」で個別に行ってください。"
-            "Step6 は overrides.enabled=true が前提（Step5＋で有効化）。Step7以降（flags作成・本番ON）は既存UIまたは手動で実行してください。")
+            "Step8（readiness 確認）・本番ON（スイッチ変更）は既存UIまたは手動・別判断で行ってください。")
 
 
 # ============================================================ 個別銘柄分析
