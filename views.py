@@ -1668,10 +1668,47 @@ def _render_production_data_creation_plan():
             "**本番スイッチ・本番ニューススコア・発掘スコア・ランキングには一切触れません。**"
             "本番ON（PRODUCTION_NEWS_OVERRIDES_ENABLED を True にする）は別判断・別PRで慎重に行います。")
 
-    st.info("v56 では Step1〜Step7（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認・運用確認フラグ作成）まで実行でき、Step8 は readiness 最終確認（read-only）です。"
+    # 📘 v57: Step9（本番ON判断）は read-only の手順表示のみ（ボタン/書込/スイッチ変更なし）。
+    #    実ONは別PRの最小1行変更（PRODUCTION_NEWS_OVERRIDES_ENABLED False→True）として扱う。
+    st.markdown("**Step9: 本番ON判断（read-only・このフローではONしません）**")
+    _ready57 = _rc56.get("ready_for_switch_on")
+    _allow57 = _sm56.get("allow")
+    st.caption(
+        f"ready_for_switch_on：{_ready57} ／ operation_ready：{_opready56} ／ allow：{_allow57}"
+        f" ／ PRODUCTION_NEWS_OVERRIDES_ENABLED：{nadopt_mod.PRODUCTION_NEWS_OVERRIDES_ENABLED}（False＝本番OFF）")
+    st.markdown(
+        "**ON前チェックリスト（別PR実行前に必須）**\n"
+        "- `ready_for_switch_on == True`（12項目・**ON前は switch OFF も条件**）をスクショ/ログ保存\n"
+        "- `operation_ready == True` / overrides.enabled / approved_production_apply_candidate≥1 / "
+        "fingerprint_match / freshness_ok / production_apply_confirmed を確認\n"
+        "- **git diff がスイッチ1行のみ**（user_data JSON 等は無変更）\n"
+        "- ON直前の発掘ランキング上位（before）を記録\n"
+        "- expected apply count（実験プレビューの score_changed / rank_changed）を記録")
+    st.markdown(
+        "**最小ON差分（別PR・1行のみ）**\n"
+        "- `modules/news_adoption.py`：`PRODUCTION_NEWS_OVERRIDES_ENABLED = False` → `True`\n"
+        "- `user_data/*.json`（overrides / flags / candidates）は変更しない")
+    st.markdown(
+        "**ON後検証手順**\n"
+        "- `get_production_overrides_status().allow == True` を確認"
+        "（※ON後は `ready_for_switch_on` が False に転じます＝『switch OFF』条件のため正常）\n"
+        "- 個別銘柄で `apply_news_overrides_if_allowed` の `applied == True` と debug（avg_before/after・delta）を確認\n"
+        "- ON前/ON後の発掘ランキング差分を比較し、expected apply count と整合するか確認\n"
+        "- 想定外の大幅変動・OUT過多があれば即ロールバック")
+    st.markdown(
+        "**ロールバック手順**\n"
+        "- 第一手：`PRODUCTION_NEWS_OVERRIDES_ENABLED = True` → `False`（1行戻し）。layer1 で即停止し news_sum が補正前に戻る\n"
+        "- スコア/ランキングは毎回 news_sum から動的計算のため、**switch を False に戻せば次回計算で完全復帰**\n"
+        "- overrides.enabled / flags は基本そのままでよい（switch False だけで停止）。"
+        "多層防御として overrides.enabled=false（Step5＋）や production_apply_confirmed=false（Step7）へ戻す選択肢もあり")
+    st.info("これは本番ON判断の手順表示のみです（read-only）。"
+            "**本番スイッチ・JSON・本番スコア・発掘ランキングには一切触れません。**"
+            "実際の本番ON（スイッチ1行変更）は別判断・別PRで慎重に行います。")
+
+    st.info("v57 では Step1〜Step7 まで実行でき、Step8（readiness 最終確認）・Step9（本番ON判断）は read-only 表示です。"
             "**candidates / 較正データ / overrides / flags JSON のみ更新し、本番スコア・発掘ランキング・本番スイッチには一切触れません。**"
             "score_correction の承認は「📋 ニュース採用候補」で個別に行ってください。"
-            "本番ON（スイッチ変更）は既存UIまたは手動・別判断で行ってください。")
+            "本番ON（PRODUCTION_NEWS_OVERRIDES_ENABLED の変更）は別PRの最小1行変更として慎重に行います。")
 
 
 # ============================================================ 個別銘柄分析
