@@ -1490,30 +1490,73 @@ def _render_production_data_creation_plan():
                 if ok:
                     st.rerun()
 
-    # 🔒 v52: Step6（approve_production_apply_candidate）は案内表示のみ（実行導線なし）。
-    #    overrides.enabled=true が前提だが、本フローは enabled=false 固定のため Step6 は実行不可。
-    #    保存/承認/flags/enabled 操作は一切しない。enabled=true 化は別PR・別判断。
+    # 🟢 v54: Step6（approve_production_apply_candidate）は案B＝保存ボタン＋明示承認ボタン（別クリック）。
+    #    safe_to_run（enabled=true 等の前提が揃った）時のみ実行UI。blocked 時は v52 の案内を維持。
+    #    実験はコピー計算のみ・保存は candidates.json のみ・承認は status 変更のみ。flags/switch/enabled は触らない。
     _s6 = steps.get("approve_production_apply_candidate", {})
-    if _s6.get("status") in ("todo", "blocked"):
+    if _s6.get("safe_to_run"):
+        st.markdown("**Step6: production_apply_candidate を保存・承認**")
+        from modules import discovery as _disc54
+        _cache54 = _disc54.load_cache()
+        _top20_54 = (_cache54.get("top20", []) if isinstance(_cache54, dict) else []) or []
+        if not _top20_54:
+            st.warning("発掘キャッシュ（top20）がありません。先に「🔍 銘柄発掘」でスキャンを実行してください。")
+        else:
+            _p54 = nadopt_mod.preview_discovery_ranking_experiment(_top20_54, experiment_enabled=True)
+            if not _p54.get("experiment_applied"):
+                st.info(f"実験未適用（{_p54.get('reason')}）。overrides.enabled=true が必要です。")
+            elif _p54.get("total", 0) == 0:
+                st.info("実験対象の発掘銘柄がありません。")
+            else:
+                st.caption(f"実験結果：対象 {_p54['total']} ／ score変化 {_p54['score_changed']} ／ "
+                           f"順位変化 {_p54['rank_changed']} ／ 新規IN {_p54['in_count']} ／ OUT {_p54['out_count']}"
+                           "（コピー計算・本番ランキング非改変）")
+                _savable54, _why54 = nadopt_mod.production_apply_savable(_p54)
+                st.caption(f"保存可否：{'✅ 保存可能' if _savable54 else '❌ 保存不可'}（{_why54}）")
+                if _savable54:
+                    if st.button("📌 Step6a: 本番反映候補を保存", key="calib_flow_pac_save", width='stretch'):
+                        done, msg = nadopt_mod.save_production_apply_candidate(_p54)
+                        (st.success if done else st.warning)(msg + "（※本番ランキングには反映しません）")
+                        if done:
+                            st.rerun()
+
+        # 承認（保存済み・未承認・fingerprint 直接一致のときだけ・自動承認なし）
+        _pac54 = next((c for c in nadopt_mod.list_all()
+                       if c.get("type") == "production_apply_candidate"), None)
+        if _pac54 is not None:
+            _saved_fp54 = _pac54.get("overrides_fingerprint")
+            _current_fp54 = nadopt_mod.overrides_fingerprint(nadopt_mod.load_overrides_config())
+            _fp_match54 = bool(_saved_fp54 and _current_fp54 and _saved_fp54 == _current_fp54)
+            _sum54 = nadopt_mod.get_production_overrides_status().get("summary", {}) or {}
+            st.caption(f"saved_fp：{_saved_fp54 or '—'} ／ current_fp：{_current_fp54 or '—'} ／ "
+                       f"fingerprint一致：{_fp_match54} ／ freshness_ok：{_sum54.get('freshness_ok')}")
+            if _pac54.get("status") == "approved":
+                st.caption("✅ production_apply_candidate は承認済みです。")
+            elif _fp_match54:
+                if st.button("✅ Step6b: 本番反映候補を承認", key="calib_flow_pac_approve", width='stretch'):
+                    nadopt_mod.approve(_pac54["id"])
+                    st.success("production_apply_candidate を承認しました（status 変更のみ・本番ランキングには反映しません）。")
+                    st.rerun()
+            else:
+                st.warning("保存時の fingerprint が現在の overrides と不一致です。"
+                           "overrides を変更した場合は「📌 Step6a」で再保存してから承認してください。")
+
+    elif _s6.get("status") == "blocked":
         st.markdown("**Step6: production_apply_candidate を保存・承認（🔒 現状は実行不可）**")
         _ov6 = nadopt_mod.load_overrides_config()
         _ov6_enabled = bool(_ov6.get("enabled")) if isinstance(_ov6, dict) else False
         st.caption(f"前提：overrides.enabled == true（現在：enabled={str(_ov6_enabled).lower()}）")
         st.warning("Step6 は overrides.enabled=true が前提です。"
-                   "本フローの generate_overrides_config() は **enabled=false 固定**で生成するため、"
-                   "現状 Step6 は **blocked（実行不可）** です。"
-                   "v52 では Step6 の保存・承認ボタンは追加しません（案内表示のみ）。")
-        st.caption("・enabled=true 化は**別PR・別判断**です（本フローでは行いません）。"
-                   "・これは overrides 個別の enabled フラグであり、本番グローバルスイッチ "
+                   "overrides 未生成 または enabled=false のため、現状 Step6 は **blocked（実行不可）** です。"
+                   "上の「Step5＋ overrides 有効化」で enabled=true にすると Step6 が実行可能になります。")
+        st.caption("・これは overrides 個別の enabled フラグであり、本番グローバルスイッチ "
                    "PRODUCTION_NEWS_OVERRIDES_ENABLED（False固定）とは**別レイヤ**です。"
-                   "・本番ON（スイッチ変更）はまだ行いません。"
-                   "・Step6 を有効化した場合の保存/承認は、従来どおり既存の "
-                   "「🧪 発掘ランキング実験プレビュー」と「📋 ニュース採用候補」で行います。")
+                   "・本番ON（スイッチ変更）はまだ行いません。")
 
-    st.info("v52 では Step1〜Step5（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成）まで実行できます。"
-            "**candidates / 較正データ / overrides(enabled=false) JSON のみ更新し、本番スコア・発掘ランキング・flags・スイッチには一切触れません。**"
+    st.info("v54 では Step1〜Step6（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成/有効化・本番反映候補の保存/承認）まで実行できます。"
+            "**candidates / 較正データ / overrides JSON のみ更新し、本番スコア・発掘ランキング・flags・本番スイッチには一切触れません。**"
             "score_correction の承認は「📋 ニュース採用候補」で個別に行ってください。"
-            "Step6 は overrides.enabled=true（別PR・別判断）が前提のため案内表示のみ、Step7以降は既存UIまたは手動で実行してください。")
+            "Step6 は overrides.enabled=true が前提（Step5＋で有効化）。Step7以降（flags作成・本番ON）は既存UIまたは手動で実行してください。")
 
 
 # ============================================================ 個別銘柄分析
