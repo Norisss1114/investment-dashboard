@@ -18,6 +18,7 @@ import datetime as dt
 from modules import storage, news_calibration as ncal
 
 PATH = "user_data/news_adoption_candidates.json"
+OVERRIDES_PATH = "user_data/news_score_overrides.json"  # v33: 設定ファイル（生成のみ・本番未読込）
 MIN_SAMPLE = 3  # n>=3 のみ候補化（low_sample は保存しない）
 
 
@@ -442,3 +443,102 @@ def production_guard(candidates=None):
     return {"decision": decision, "has_approved_sim": has_approved_sim, "checks": checks,
             "improvement": (imp if has_approved_sim else None),
             "reasons": reasons, "next_actions": next_actions}
+
+
+# ---------------- v33: 本番反映用の設定ファイル生成（生成のみ・news.py 未読込・本番非反映） ----------------
+def _approved_score_corrections(cands):
+    return [c for c in cands if c.get("type") == "score_correction" and c.get("status") == "approved"]
+
+
+def _approved_simulation(cands):
+    return next((c for c in cands
+                 if c.get("type") == "simulation_result" and c.get("status") == "approved"), None)
+
+
+def build_overrides_config(candidates=None):
+    """approved score_correction / simulation_result から overrides 設定 dict を組み立てる（保存しない）。
+    ⚠️ enabled は必ず False（生成しても本番反映しないための安全ガード）。"""
+    cands = candidates if candidates is not None else load()
+    if not isinstance(cands, list):
+        cands = []
+    approved = _approved_score_corrections(cands)
+    sim = _approved_simulation(cands)
+    guard = production_guard(cands)
+
+    impact_overrides, category_adjustments, sentiment_notes = {}, {}, {}
+    for c in approved:
+        tgt = c.get("target")
+        if tgt == "impact":
+            cur, rec = c.get("current_score"), c.get("recommended_score")
+            if isinstance(cur, int) and isinstance(rec, int):
+                impact_overrides[str(cur)] = rec
+        elif tgt == "category":
+            d = c.get("delta")
+            lab = c.get("label")
+            if isinstance(d, int) and lab:
+                category_adjustments[lab] = category_adjustments.get(lab, 0) + d  # 防御的に合算
+        elif tgt == "sentiment":
+            lab = c.get("label")
+            if lab:
+                sentiment_notes[lab] = c.get("suggestion", "")
+
+    imp = (sim or {}).get("improvement", {}) or {}
+    simulation_summary = {
+        "eligible_n": (sim or {}).get("eligible_n"),
+        "applicable_news": (sim or {}).get("applicable_news"),
+        "approved_correction_count": (sim or {}).get("approved_correction_count"),
+        "corr_ret30_delta": imp.get("corr_ret30_delta"),
+        "mono_violations_delta": imp.get("mono_violations_delta"),
+        "high_vs_spy30_delta": imp.get("high_vs_spy30_delta"),
+    }
+
+    return {
+        "version": 1,
+        "generated_at": _now(),
+        "enabled": False,  # 必ず False（本番反映しない）
+        "source": "approved_news_score_corrections",
+        "guard_decision": guard["decision"],
+        "impact_overrides": impact_overrides,
+        "category_adjustments": category_adjustments,
+        "sentiment_notes": sentiment_notes,
+        "simulation_summary": simulation_summary,
+        "note": "Generated only. Not applied to production scoring.",
+    }
+
+
+def can_generate_overrides(candidates=None):
+    """生成条件を満たすか判定。返り値 (ok:bool, reason:str)。"""
+    cands = candidates if candidates is not None else load()
+    if not isinstance(cands, list):
+        cands = []
+    if production_guard(cands)["decision"] != "反映準備OK":
+        return False, "本番反映前チェックが「反映準備OK」ではありません"
+    if not _approved_score_corrections(cands):
+        return False, "承認済み score_correction がありません"
+    sim = _approved_simulation(cands)
+    if sim is None:
+        return False, "承認済み simulation_result がありません"
+    if sim.get("verdict") != "改善":
+        return False, f"simulation_result の verdict が「改善」ではありません（{sim.get('verdict')}）"
+    return True, "生成条件を満たしています"
+
+
+def generate_overrides_config(candidates=None):
+    """生成条件を満たす場合のみ news_score_overrides.json を生成（上書き）。
+    満たさなければ保存せず (False, 理由, None)。満たせば (True, msg, config)。
+    ⚠️ news.py には読み込ませない・本番ニューススコアには反映しない（enabled=False）。"""
+    cands = candidates if candidates is not None else load()
+    if not isinstance(cands, list):
+        cands = []
+    ok, reason = can_generate_overrides(cands)
+    if not ok:
+        return False, reason, None
+    cfg = build_overrides_config(cands)
+    storage.save_json(OVERRIDES_PATH, cfg)
+    return True, f"{OVERRIDES_PATH} を生成しました（enabled=false・本番未反映）", cfg
+
+
+def load_overrides_config():
+    """生成済み overrides を読む（表示用）。無ければ None。"""
+    cfg = storage.load_json(OVERRIDES_PATH, None)
+    return cfg if isinstance(cfg, dict) else None

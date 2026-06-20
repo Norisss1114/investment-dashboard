@@ -774,6 +774,48 @@ def _render_production_guard():
 
     st.info("これは最終ガード表示のみで、本番ニューススコアには反映していません。")
 
+    # 📝 v33: 反映準備OK 時のみ設定ファイルを生成（生成のみ・news.py 未読込・本番非反映）
+    _render_overrides_generator()
+
+
+def _render_overrides_generator():
+    """v33: 承認済み補正案から news_score_overrides.json を生成（生成のみ・本番非反映）。"""
+    st.divider()
+    st.subheader("📝 ニューススコア設定ファイル生成")
+    cands = nadopt_mod.list_all()
+    guard = nadopt_mod.production_guard(cands)
+    approved_sc = [c for c in cands if c.get("type") == "score_correction" and c.get("status") == "approved"]
+    has_sim = any(c.get("type") == "simulation_result" and c.get("status") == "approved" for c in cands)
+    ok, reason = nadopt_mod.can_generate_overrides(cands)
+
+    st.markdown(f'- guard 判定：**{guard["decision"]}**')
+    st.markdown(f'- 承認済み score_correction：**{len(approved_sc)}** 件')
+    st.markdown(f'- 承認済み simulation_result：**{"あり" if has_sim else "なし"}**')
+    st.markdown(f'- 生成可否：**{"✅ 生成可能" if ok else "❌ 生成不可"}**（{reason}）')
+
+    if ok:
+        if st.button("📝 news_score_overrides.json を生成", key="nover_gen", width='stretch'):
+            done, msg, cfg = nadopt_mod.generate_overrides_config(cands)
+            if done:
+                st.success(msg)
+                st.markdown(f'- 保存先：`{nadopt_mod.OVERRIDES_PATH}`')
+                st.markdown(f'- enabled：**{str(cfg["enabled"]).lower()}**（本番反映しません）')
+                st.markdown(f'- impact_overrides：**{len(cfg["impact_overrides"])}** 件')
+                st.markdown(f'- category_adjustments：**{len(cfg["category_adjustments"])}** 件')
+                st.markdown(f'- sentiment_notes：**{len(cfg["sentiment_notes"])}** 件')
+            else:
+                st.warning(msg)
+    else:
+        st.caption("生成条件（反映準備OK＋承認済み score_correction 1件以上＋承認済み simulation_result(改善)）を満たすと生成ボタンが表示されます。")
+
+    existing = nadopt_mod.load_overrides_config()
+    if existing:
+        st.caption(f'生成済み：{nadopt_mod.OVERRIDES_PATH}（generated_at {existing.get("generated_at","—")} ／ '
+                   f'enabled={str(existing.get("enabled")).lower()} ／ impact {len(existing.get("impact_overrides",{}))} ／ '
+                   f'category {len(existing.get("category_adjustments",{}))} ／ sentiment {len(existing.get("sentiment_notes",{}))}）')
+    st.info("これは設定ファイルの生成のみで、news.py には読み込ませていません。"
+            "**本番ニューススコア・発掘スコア・ランキングには一切反映していません（enabled=false）。**")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
