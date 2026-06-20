@@ -1305,6 +1305,34 @@ def _render_production_data_checklist():
     st.info("これは運用データの準備状況チェックです。**本番スイッチは変更しません。"
             "本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
+    # 🛠 v50: 実データ作成フロー（read-only 手順表示・実行ボタンなし）
+    _render_production_data_creation_plan()
+
+
+def _render_production_data_creation_plan():
+    """v50: 本番ONまでの運用データ作成手順を順序表示（read-only・実行ボタンなし）。"""
+    st.divider()
+    st.subheader("🛠 実データ作成フロー")
+    plan = nadopt_mod.production_data_creation_plan()
+    if plan["all_done"]:
+        st.success("全ステップ完了。運用データは揃っています（本番ONは別PRで慎重に判断）。")
+    else:
+        st.markdown(f'現在のステップ：**{plan["current_step"] or "—"}**')
+
+    _mark = {"done": "✅", "todo": "⬜", "blocked": "🔒"}
+    rows = []
+    for i, s in enumerate(plan["steps"], 1):
+        rows.append({
+            "#": i, "状態": f'{_mark.get(s["status"], "・")} {s["status"]}',
+            "ステップ": s["title"], "操作": s["action"], "関数": s["function"],
+            "safe_to_run": s["safe_to_run"],
+            "ブロック理由": (s["blocking_reason"] or "—"),
+        })
+    st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+    st.info("これは作業手順の表示のみです。**データもスイッチも変更しません。"
+            "実行は既存UIまたは手動で行ってください（実行ボタンは v51 以降）。**")
+
 
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):

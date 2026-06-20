@@ -1569,3 +1569,84 @@ def production_data_checklist():
         "readiness": readiness,
         "next_steps": next_steps,
     }
+
+
+# ---------------- v50: 実データ作成フロー（read-only 手順表示・実行ボタンなし・本番非接続） ----------------
+def production_data_creation_plan():
+    """本番ONまでの運用データ作成手順を順序付きで返す（read-only・表示のみ・実行系なし）。
+    ⚠️ データもスイッチも変更しない。production_data_checklist() の現状から各ステップの
+    status(done/todo/blocked)/action/blocking_reason/safe_to_run を導出する。"""
+    d = production_data_checklist()
+    cal = d["calibration"]
+    cand = d["candidates"]
+    ov = d["overrides"]
+    fl = d["flags"]
+    rd = d["readiness"]
+
+    # 各ステップの「完了したか」を現状から判定（パイプライン順）
+    done_flags = [
+        cal["saved"] >= 1,                                      # 1 save_calibration
+        cal["ret30_count"] >= MIN_RET30_FOR_PRODUCTION,         # 2 update_returns
+        cand["approved_score_correction"] >= 1,                 # 3 approve_score_correction
+        cand["approved_simulation_result"] >= 1,                # 4 approve_simulation_result
+        ov["exists"] and ov["enabled"] is True,                # 5 generate_overrides(+enabled)
+        cand["approved_production_apply_candidate"] >= 1 and ov["fingerprint_match"] is True,  # 6
+        fl["production_apply_confirmed"] is True,               # 7 create_flags
+        rd["ready_for_switch_on"] is True,                     # 8 confirm_readiness
+    ]
+
+    specs = [
+        ("save_calibration", "ニュース較正データを保存",
+         "個別銘柄分析の『📥 この銘柄のニュースを較正データに保存』を実行",
+         "news_calibration.add_for_ticker()"),
+        ("update_returns", f"較正リターンを更新（ret_30 を {MIN_RET30_FOR_PRODUCTION}件以上に）",
+         f"『🔄 較正リターンを更新』を実行（30営業日経過が必要・現在 ret30 {cal['ret30_count']}件 / 不足 {cal['ret30_missing']}件）",
+         "news_calibration.update_returns()"),
+        ("approve_score_correction", "補正案(score_correction)を保存・承認",
+         "ニュース較正分析の『📌 較正提案を検証候補に保存』→ 採用候補で承認",
+         "news_adoption.save_score_corrections() + approve()"),
+        ("approve_simulation_result", "シミュレーション結果(simulation_result)を保存・承認",
+         "『📌 シミュレーション結果を本番反映候補に保存』→ 承認",
+         "news_adoption.save_simulation_result() + approve()"),
+        ("generate_overrides", "overrides を生成し enabled=true にする",
+         "『📝 news_score_overrides.json を生成』→ 本番運用判断で enabled=true に設定",
+         "news_adoption.generate_overrides_config()"),
+        ("approve_production_apply_candidate", "production_apply_candidate を承認（fingerprint一致）",
+         "『📌 実験ランキング結果を本番反映候補に保存』→ 承認（overrides と fingerprint 一致が必要）",
+         "news_adoption.save_production_apply_candidate() + approve()"),
+        ("create_flags", "news_production_flags.json を手動作成",
+         'user_data/news_production_flags.json を手動作成し {"production_apply_confirmed": true} を設定（v50では手動）',
+         "（手動・v51以降で実行系を別検討）"),
+        ("confirm_readiness", "readiness が true になることを確認",
+         "『✅ 本番ON前チェックリスト』『📋 ON前 実データ運用チェックリスト』で ready/operation_ready を確認",
+         "news_adoption.production_on_readiness_check()"),
+    ]
+
+    # safe_to_run = 前段が全 done かつ 自身が未完
+    steps = []
+    prior_all_done = True
+    current_step = None
+    for i, (sid, title, action, func) in enumerate(specs):
+        is_done = bool(done_flags[i])
+        if is_done:
+            status = "done"
+            safe = False
+        elif prior_all_done:
+            status = "todo"
+            safe = True
+            if current_step is None:
+                current_step = sid
+        else:
+            status = "blocked"
+            safe = False
+        blocking_reason = None
+        if status == "blocked":
+            blocking_reason = "前段のステップが未完です"
+        steps.append({
+            "id": sid, "title": title, "status": status, "action": action,
+            "function": func, "blocking_reason": blocking_reason, "safe_to_run": safe,
+        })
+        prior_all_done = prior_all_done and is_done
+
+    all_done = all(done_flags)
+    return {"all_done": all_done, "current_step": current_step, "steps": steps}
