@@ -320,3 +320,125 @@ def save_simulation_result(sim):
     }
     created = _upsert(cand)
     return True, ("保存しました（新規）" if created else "更新しました（既存candidate/承認状態は保持）")
+
+
+# ---------------- v32: 本番反映前の最終ガード（表示のみ・本番非反映） ----------------
+GUARD_MIN_ELIGIBLE = 30
+GUARD_MIN_APPLICABLE = 10
+GUARD_MIN_CORRECTIONS = 1
+
+
+def production_guard(candidates=None):
+    """approved な simulation_result を読み、本番反映してよい状態かを判定（表示のみ）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない（判定の表示のみ）。
+    candidates は引数注入可（None なら list_all()）。None値でも落ちない。
+    判定優先順位: データ不足 → 悪化リスクあり → 反映準備OK → まだ反映しない。"""
+    cands = candidates if candidates is not None else load()
+    if not isinstance(cands, list):
+        cands = []
+    sim = next((c for c in cands
+                if c.get("type") == "simulation_result" and c.get("status") == "approved"), None)
+    has_approved_sim = sim is not None
+
+    imp = (sim or {}).get("improvement", {}) or {}
+    verdict = (sim or {}).get("verdict")
+    eligible_n = (sim or {}).get("eligible_n")
+    applicable = (sim or {}).get("applicable_news")
+    corr_cnt = (sim or {}).get("approved_correction_count")
+    d_corr = imp.get("corr_ret30_delta")
+    d_mono = imp.get("mono_violations_delta")
+    d_high = imp.get("high_vs_spy30_delta")
+
+    def _num(v):
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+    # 改善指標（None は不成立扱い）
+    imp_corr = isinstance(d_corr, (int, float)) and d_corr >= 0.05
+    imp_mono = isinstance(d_mono, (int, float)) and d_mono < 0
+    imp_high = isinstance(d_high, (int, float)) and d_high >= 2
+    has_improve = imp_corr or imp_mono or imp_high
+
+    # 悪化指標（None は該当しない）
+    wor_corr = isinstance(d_corr, (int, float)) and d_corr <= -0.05
+    wor_mono = isinstance(d_mono, (int, float)) and d_mono > 0
+    wor_high = isinstance(d_high, (int, float)) and d_high <= -2
+    has_worsen = wor_corr or wor_mono or wor_high
+
+    # データ不足条件
+    insufficient = (not has_approved_sim or _num(eligible_n) < GUARD_MIN_ELIGIBLE
+                    or _num(applicable) < GUARD_MIN_APPLICABLE or _num(corr_cnt) < GUARD_MIN_CORRECTIONS)
+
+    # 反映準備OK条件
+    ok_ready = (has_approved_sim and verdict == "改善"
+                and _num(eligible_n) >= GUARD_MIN_ELIGIBLE
+                and _num(applicable) >= GUARD_MIN_APPLICABLE
+                and _num(corr_cnt) >= GUARD_MIN_CORRECTIONS
+                and has_improve and not has_worsen)
+
+    # 判定（優先順位: データ不足 → 悪化リスク → OK → まだ）
+    if insufficient:
+        decision = "データ不足"
+    elif has_worsen:
+        decision = "悪化リスクあり"
+    elif ok_ready:
+        decision = "反映準備OK"
+    else:
+        decision = "まだ反映しない"
+
+    def _fmt(v):
+        return v if v is not None else "—"
+
+    checks = [
+        {"label": "approved simulation_result", "ok": has_approved_sim, "value": ("あり" if has_approved_sim else "なし")},
+        {"label": "verdict 改善", "ok": (verdict == "改善"), "value": _fmt(verdict)},
+        {"label": f"eligible_n ≥ {GUARD_MIN_ELIGIBLE}", "ok": _num(eligible_n) >= GUARD_MIN_ELIGIBLE, "value": _fmt(eligible_n)},
+        {"label": f"applicable_news ≥ {GUARD_MIN_APPLICABLE}", "ok": _num(applicable) >= GUARD_MIN_APPLICABLE, "value": _fmt(applicable)},
+        {"label": f"approved_correction_count ≥ {GUARD_MIN_CORRECTIONS}", "ok": _num(corr_cnt) >= GUARD_MIN_CORRECTIONS, "value": _fmt(corr_cnt)},
+        {"label": "corr_ret30_delta ≥ +0.05", "ok": imp_corr, "value": _fmt(d_corr)},
+        {"label": "mono_violations_delta < 0", "ok": imp_mono, "value": _fmt(d_mono)},
+        {"label": "high_vs_spy30_delta ≥ +2", "ok": imp_high, "value": _fmt(d_high)},
+        {"label": "悪化指標なし", "ok": not has_worsen, "value": ("悪化あり" if has_worsen else "なし")},
+    ]
+
+    # 理由
+    reasons = []
+    if not has_approved_sim:
+        reasons.append("承認済み simulation_result がありません")
+    else:
+        if _num(eligible_n) < GUARD_MIN_ELIGIBLE:
+            reasons.append(f"eligible_n {eligible_n} < {GUARD_MIN_ELIGIBLE}")
+        if _num(applicable) < GUARD_MIN_APPLICABLE:
+            reasons.append(f"applicable_news {applicable} < {GUARD_MIN_APPLICABLE}")
+        if _num(corr_cnt) < GUARD_MIN_CORRECTIONS:
+            reasons.append(f"approved_correction_count {corr_cnt} < {GUARD_MIN_CORRECTIONS}")
+        if verdict != "改善":
+            reasons.append(f"verdict が「改善」でない（{verdict}）")
+        if has_worsen:
+            ws = []
+            if wor_corr:
+                ws.append(f"corr_ret30_delta {d_corr:+.3f} ≤ -0.05")
+            if wor_mono:
+                ws.append(f"mono_violations_delta {d_mono:+d} > 0")
+            if wor_high:
+                ws.append(f"high_vs_spy30_delta {d_high:+.1f} ≤ -2")
+            reasons.append("悪化指標: " + " / ".join(ws))
+        if not insufficient and not has_worsen and not has_improve:
+            reasons.append("改善指標が1つも立っていない")
+        if decision == "反映準備OK":
+            reasons.append("十分なデータ・改善指標あり・悪化指標なし")
+
+    # 次のアクション
+    if decision == "データ不足":
+        next_actions = ["ニュース較正データを増やす", "追加ニュースを保存する",
+                        "ret_30 の更新を待つ（30営業日経過が必要）", "反映はまだしない"]
+    elif decision == "悪化リスクあり":
+        next_actions = ["補正案を見直す（承認を取り消す/調整）", "シミュレーションをやり直す", "反映はまだしない"]
+    elif decision == "まだ反映しない":
+        next_actions = ["明確な改善指標が出るまで継続", "データを増やして再シミュレーション", "反映はまだしない"]
+    else:  # 反映準備OK
+        next_actions = ["人手で最終確認する（自動反映はしない）",
+                        "本番反映は別途・慎重に判断（このツールでは反映しません）"]
+
+    return {"decision": decision, "has_approved_sim": has_approved_sim, "checks": checks,
+            "improvement": (imp if has_approved_sim else None),
+            "reasons": reasons, "next_actions": next_actions}

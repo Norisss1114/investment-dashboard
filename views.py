@@ -741,6 +741,39 @@ def _render_news_correction_simulation():
             (st.success if ok else st.warning)(msg + "（※本番スコアには反映しません）")
         st.caption("保存結果は下の「📋 ニュース採用候補」に simulation_result として表示されます。")
 
+    # 🛡 v32: 本番反映前の最終ガード（表示のみ・本番非反映）
+    _render_production_guard()
+
+
+_GUARD_DECISION_COLOR = {"反映準備OK": "#16a34a", "まだ反映しない": "#64748b",
+                         "データ不足": "#eab308", "悪化リスクあり": "#dc2626"}
+
+
+def _render_production_guard():
+    """v32: 本番反映前の最終ガード（判定・チェックリスト表示のみ・本番非反映）。"""
+    st.divider()
+    st.subheader("🛡 本番反映前チェック")
+    g = nadopt_mod.production_guard()
+    dc = _GUARD_DECISION_COLOR.get(g["decision"], "#64748b")
+    st.markdown(f'判定：<b style="color:{dc};font-size:1.05rem;">{g["decision"]}</b>', unsafe_allow_html=True)
+
+    st.markdown("**チェックリスト**")
+    for c in g["checks"]:
+        mark = "✅" if c["ok"] else "❌"
+        st.markdown(f'{mark} {c["label"]}：{c["value"]}')
+
+    if g["reasons"]:
+        st.markdown("**理由**")
+        for r in g["reasons"]:
+            st.caption("・" + r)
+
+    if g["next_actions"]:
+        st.markdown("**次のアクション**")
+        for a in g["next_actions"]:
+            st.markdown(f"- {a}")
+
+    st.info("これは最終ガード表示のみで、本番ニューススコアには反映していません。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
