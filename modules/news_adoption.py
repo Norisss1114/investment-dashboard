@@ -1285,29 +1285,87 @@ def get_production_overrides_status():
             "fingerprint_match": fingerprint_match}
 
 
-# ---------------- v44: 本番適用関数の足場（switch OFF で絶対未適用・本番非接続） ----------------
+# ---------------- v46: news_sum への近似補正本体（純関数・layer3 でのみ呼ばれる） ----------------
+def _apply_overrides_to_news_sum(news_sum, cfg):
+    """news_sum の avg_impact に overrides を近似補正し、score を再計算した news_sum を返す（純関数）。
+    ⚠️ 個別ニュース item が無いため avg_impact ベースの近似（impact_overrides は代表値 round(avg) に適用、
+    category_adjustments は categories に出現したラベルごとに delta を1回加算＝件数で重み付けしない）。
+    bull/bear/neutral/categories は不変。reasons は補正時のみ1行追加。
+    返り値 (adjusted_news_sum, debug)。news_sum/cfg は破壊しない（deep copy 前提で呼ぶ）。"""
+    adjusted = copy.deepcopy(news_sum) if isinstance(news_sum, dict) else {}
+    cfg = cfg if isinstance(cfg, dict) else {}
+    impact_overrides = cfg.get("impact_overrides") or {}
+    category_adjustments = cfg.get("category_adjustments") or {}
+
+    original_avg = adjusted.get("avg_impact", 0) or 0
+    original_score = adjusted.get("score", 0) or 0
+
+    new_avg = original_avg
+    # impact_overrides: 代表値 round(avg) に適用
+    ri = int(round(original_avg))
+    impact_override_applied = str(ri) in impact_overrides
+    if impact_override_applied:
+        v = impact_overrides[str(ri)]
+        if isinstance(v, int):
+            new_avg = original_avg + (v - ri)
+        else:
+            impact_override_applied = False
+    # category_adjustments: categories に出現したラベルごとに delta を1回加算（件数で重み付けしない）
+    category_adjustment_applied = False
+    for label in (adjusted.get("categories") or {}):
+        d = category_adjustments.get(label)
+        if isinstance(d, int):
+            new_avg += d
+            category_adjustment_applied = True
+
+    new_avg = max(-5.0, min(5.0, new_avg))
+    new_score = round(max(0.0, min(20.0, 10.0 + new_avg * 2.0)), 1)
+    new_avg_r = round(new_avg, 1)
+
+    matched = (impact_override_applied or category_adjustment_applied)
+    actually_changed = matched and (new_avg_r != round(original_avg, 1) or new_score != original_score)
+    adjusted["avg_impact"] = new_avg_r
+    adjusted["score"] = new_score
+    if actually_changed:  # 補正が実際に値を変えた場合のみ reason を1行追加
+        reasons = list(adjusted.get("reasons") or [])
+        reasons.append(f"ニュース補正適用: avg_impact {round(original_avg,1):+.1f} → {new_avg_r:+.1f}")
+        adjusted["reasons"] = reasons
+
+    debug = {
+        "avg_before": original_avg, "avg_after": new_avg_r,
+        "score_before": original_score, "score_after": new_score,
+        "impact_override_applied": impact_override_applied,
+        "category_adjustment_applied": category_adjustment_applied,
+        "delta": round(new_avg_r - round(original_avg, 1), 1),
+    }
+    return adjusted, debug
+
+
+# ---------------- v44/v45/v46: 本番適用関数（switch OFF で絶対未発火・本番非接続） ----------------
 def apply_news_overrides_if_allowed(news_sum):
-    """news_sum に overrides を適用…する“足場”。⚠️ v44 では絶対に適用しない（applied=False 固定）。
-    本番ニューススコア・発掘スコア・ランキングには一切反映しない。news.py からは未接続。
-    必ず deep copy を返し、元の news_sum（categories/reasons のネスト含む）を破壊しない。
-    None / 非dict でも落ちない。"""
+    """news_sum に overrides を適用する関数。layer1/2 のゲートで本番未発火を保証。
+    ⚠️ PRODUCTION_NEWS_OVERRIDES_ENABLED=False（OFF固定）の限り layer1 で即 return ＝補正に到達しない。
+    本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    必ず deep copy を返し元の news_sum を破壊しない。None / 非dict でも落ちない。
+    debug は適用時（layer3）のみ返り値トップレベルに付与（news_sum には混ぜない）。"""
     copied = copy.deepcopy(news_sum) if isinstance(news_sum, dict) else {}
 
-    # v45: グローバルスイッチ OFF なら status 評価（JSON読込）をスキップして即 return（ホットパス軽量化）。
+    # layer1: グローバルスイッチ OFF なら status 評価をスキップして即 return（本番はここで止まる）。
     if not PRODUCTION_NEWS_OVERRIDES_ENABLED:
         return {"news_sum": copied, "applied": False,
                 "reason": "Production overrides disabled by global switch",
-                "status": {"allow": False}}
+                "status": {"allow": False}, "debug": None}
 
     status = get_production_overrides_status()
 
+    # layer2: ゲート不許可なら即 return。
     if not status.get("allow"):
         return {"news_sum": copied, "applied": False,
-                "reason": "Production overrides not allowed", "status": status}
+                "reason": "Production overrides not allowed", "status": status, "debug": None}
 
-    # ⚠️ allow=True に到達しても v44 では意図的に未適用（足場のみ）。
-    # TODO(v45+): allow=True かつ本番解禁時のみ、avg_impact を overrides で調整し
-    #             reasons に「overrides適用」を追加、score を再計算する（今回は実装しない）。
-    return {"news_sum": copied, "applied": False,
-            "reason": "Production overrides application is intentionally disabled in v44 safety mode",
-            "status": status}
+    # layer3: allow=True のときだけ実補正（v46）。switch OFF の本番ではここに到達しない。
+    cfg = load_overrides_config()
+    adjusted, debug = _apply_overrides_to_news_sum(copied, cfg)
+    return {"news_sum": adjusted, "applied": True,
+            "reason": "Production overrides applied (approximate, avg_impact based)",
+            "status": status, "debug": debug}
