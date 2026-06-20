@@ -2645,6 +2645,45 @@ def _render_discovery_result(disc, regime):
             } for it in disc["excluded"]])
             st.dataframe(edf.style.format({"スコア": "{:.1f}"}), width='stretch', height=280)
 
+    # 🧪 v40: 発掘ランキング実験プレビュー（近似・表示のみ・本番非反映）
+    _render_discovery_ranking_experiment(disc.get("top20", []))
+
+
+def _render_discovery_ranking_experiment(top20):
+    """v40: top20 の news を実験ニュースで近似補正し、順位への影響を比較（表示のみ・本番非接続）。"""
+    st.divider()
+    st.subheader("🧪 発掘ランキング実験プレビュー")
+    exp_on = st.checkbox("🧪 発掘ランキング実験を表示（このセッションのみ・本番非反映）",
+                         value=False, key="disc_rank_exp")
+    p = nadopt_mod.preview_discovery_ranking_experiment(top20, experiment_enabled=exp_on)
+
+    if not p["experiment_applied"]:
+        st.info(f"未適用（{p['reason']}）。overrides enabled=true かつ実験チェックON の両方が必要です。")
+        return
+    if p["total"] == 0:
+        st.info("対象の発掘銘柄がありません。")
+        return
+
+    m = st.columns(5)
+    m[0].metric("対象銘柄数", p["total"])
+    m[1].metric("score変化", p["score_changed"])
+    m[2].metric("順位変化", p["rank_changed"])
+    m[3].metric("新規IN(top10)", p["in_count"])
+    m[4].metric("OUT(top10)", p["out_count"])
+
+    st.dataframe(pd.DataFrame([{
+        "ticker": r["ticker"], "company": (r["name"] or "")[:24],
+        "original_rank": r["original_rank"], "experiment_rank": r["experiment_rank"],
+        "rank_delta": f'{r["rank_delta"]:+d}',
+        "original_score": r["original_score"], "experiment_score": r["experiment_score"],
+        "score_delta": f'{r["score_delta"]:+.1f}',
+        "original_verdict": r["original_verdict"], "experiment_verdict": r["experiment_verdict"],
+        "status": r["status"],
+    } for r in p["rows"]]), width='stretch', hide_index=True)
+
+    st.info("これは発掘ランキングの実験プレビューのみです。本番ランキングには反映していません。")
+    st.caption("近似：impact_overrides のみ反映。category補正とaction再計算は未反映です。")
+
 
 # ================================================================== v8.5: Moomoo同期
 from modules import moomoo_import as mm_mod

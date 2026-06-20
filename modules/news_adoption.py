@@ -939,3 +939,122 @@ def experiment_individual_score(scores, news_sum, snap, fund, plan, exp_avg_impa
         "news_delta": round(experiment_news_component - original_news_component, 1),
         "note": "ニュース以外のスコアは同一。実験actionは market_mode=中立 前提。",
     }
+
+
+# ---------------- v40: 発掘ランキングへの影響プレビュー（近似・表示のみ・本番非接続） ----------------
+def _discovery_verdict(score, confidence):
+    """discovery の verdict 閾値を再現（強いBUY≥80/BUY≥70/WATCH≥55/else AVOID、confidence低でdowngrade）。"""
+    import config
+    v = ("強いBUY" if score >= config.DISCOVERY_BUY_STRONG
+         else "BUY" if score >= config.DISCOVERY_BUY
+         else "WATCH" if score >= config.DISCOVERY_WATCH else "AVOID")
+    if confidence == "低" and v in ("強いBUY", "BUY"):
+        v = "WATCH"
+    return v
+
+
+def preview_discovery_ranking_experiment(items, cfg=None, experiment_enabled=False, top_n=10):
+    """発掘 top20 items の news component を実験ニュースで近似補正し、順位への影響を比較（表示のみ）。
+    ⚠️ 本番発掘スコア・ランキングには一切反映しない（items はコピーで計算・原本非変更）。
+    近似：item に個別ニュース/categories が無いため、impact_overrides を代表値 round(news_impact)
+    に近似適用（category補正・action再計算は未反映）。scoring._news_raw は read-only 利用。"""
+    from modules import scoring
+
+    cfg = cfg if cfg is not None else load_overrides_config()
+    exists = isinstance(cfg, dict)
+    enabled = bool(cfg.get("enabled")) if exists else None
+    experiment_flag = bool(experiment_enabled)
+
+    # 3段ゲート
+    if not exists:
+        applied, reason = False, "overridesなし"
+    elif enabled is not True:
+        applied, reason = False, "enabled=false"
+    elif experiment_flag is not True:
+        applied, reason = False, "experiment flag=false"
+    else:
+        applied, reason = True, "実験適用"
+
+    impact_map = {}
+    if applied:
+        for k, v in (cfg.get("impact_overrides") or {}).items():
+            if isinstance(v, int):
+                impact_map[str(k)] = v
+
+    items = items if isinstance(items, list) else []
+    n = len(items)
+
+    def _clamp5f(v):
+        return max(-5.0, min(5.0, v))
+
+    # 1) original_rank（元の並び順）＋ experiment_score を算出（コピー計算・原本非変更）
+    work = []
+    for i, it in enumerate(items, 1):
+        orig_score = it.get("score", 0) or 0
+        orig_news = (it.get("breakdown") or {}).get("news", 0) or 0
+        avg = it.get("news_impact", 0) or 0
+        confidence = it.get("confidence")
+        orig_verdict = it.get("verdict")
+
+        exp_score = orig_score
+        if applied:
+            ri = int(round(avg))
+            exp_avg = avg + (impact_map[str(ri)] - ri) if str(ri) in impact_map else avg
+            exp_avg = _clamp5f(exp_avg)
+            try:
+                raw_orig = scoring._news_raw({"avg_impact": avg, "categories": {}})[0]
+                raw_exp = scoring._news_raw({"avg_impact": exp_avg, "categories": {}})[0]
+            except Exception:
+                raw_orig, raw_exp = None, None
+            if raw_orig and raw_orig > 0 and raw_exp is not None:
+                weight = orig_news / raw_orig          # discovery news 重みを逆算
+                exp_news_comp = round(raw_exp * weight, 1)
+                exp_score = round(orig_score - orig_news + exp_news_comp, 1)
+        work.append({
+            "ticker": it.get("ticker"), "name": it.get("name", it.get("ticker")),
+            "original_rank": i, "original_score": orig_score, "experiment_score": exp_score,
+            "original_verdict": orig_verdict,
+            "experiment_verdict": _discovery_verdict(exp_score, confidence),
+        })
+
+    # 2) experiment_rank（experiment_score 降順。同点は original_rank で安定）
+    order = sorted(work, key=lambda x: (-x["experiment_score"], x["original_rank"]))
+    for rank, w in enumerate(order, 1):
+        w["experiment_rank"] = rank
+
+    # 3) status / 集計
+    rows, score_changed, rank_changed, in_count, out_count = [], 0, 0, 0, 0
+    for w in work:
+        rank_delta = w["original_rank"] - w["experiment_rank"]
+        score_delta = round(w["experiment_score"] - w["original_score"], 1)
+        if w["original_rank"] > top_n and w["experiment_rank"] <= top_n:
+            status = "新規IN"
+            in_count += 1
+        elif w["original_rank"] <= top_n and w["experiment_rank"] > top_n:
+            status = "OUT"
+            out_count += 1
+        elif rank_delta > 0:
+            status = "上昇"
+        elif rank_delta < 0:
+            status = "下落"
+        else:
+            status = "変化なし"
+        if score_delta != 0:
+            score_changed += 1
+        if rank_delta != 0:
+            rank_changed += 1
+        rows.append({
+            "ticker": w["ticker"], "name": w["name"],
+            "original_rank": w["original_rank"], "experiment_rank": w["experiment_rank"],
+            "rank_delta": rank_delta,
+            "original_score": w["original_score"], "experiment_score": w["experiment_score"],
+            "score_delta": score_delta,
+            "original_verdict": w["original_verdict"], "experiment_verdict": w["experiment_verdict"],
+            "status": status})
+    rows.sort(key=lambda x: x["experiment_rank"])
+
+    return {
+        "available": exists, "enabled": enabled, "experiment_flag": experiment_flag,
+        "experiment_applied": applied, "reason": reason,
+        "total": n, "score_changed": score_changed, "rank_changed": rank_changed,
+        "in_count": in_count, "out_count": out_count, "rows": rows}
