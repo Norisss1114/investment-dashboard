@@ -647,3 +647,185 @@ def correction_proposals(records=None):
     return {"confidence": confidence, "impact": impact_props, "sentiment": sentiment_props,
             "category": category_props, "insufficient": insufficient,
             "data_insufficient": data_insufficient}
+
+
+# ---------------- v30: 承認済み補正案のシミュレーション検証（表示のみ・本番非反映・JSON非改変） ----------------
+SIM_HIGH = 4    # high impact: score >= 4
+SIM_LOW = -4    # low impact:  score <= -4
+SIM_MIN_ELIGIBLE = 10  # eligible_n がこれ未満はサンプル不足
+
+
+def _simulated_score(impact_score, categories, impact_map, category_deltas):
+    """1ニュースの補正後スコア。impact置換 → category加算 → clamp(-5..+5)。
+    impact_map: {current_score:int -> recommended_score:int}
+    category_deltas: {category_label:str -> delta:int(合算済み)}"""
+    s = impact_score
+    if s in impact_map:               # 1) impact 置換
+        s = impact_map[s]
+    for c in (categories or []):      # 2) category 加算（複数該当は合算）
+        if c in category_deltas:
+            s += category_deltas[c]
+    return _clamp_score(int(round(s)))  # 3) clamp(-5..+5)
+
+
+def _pearson(xs, ys):
+    """Pearson 相関。n<2 や分散0は None。落ちない。"""
+    pairs = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+    n = len(pairs)
+    if n < 2:
+        return None
+    mx = sum(p[0] for p in pairs) / n
+    my = sum(p[1] for p in pairs) / n
+    sxx = sum((p[0] - mx) ** 2 for p in pairs)
+    syy = sum((p[1] - my) ** 2 for p in pairs)
+    if sxx <= 0 or syy <= 0:
+        return None
+    sxy = sum((p[0] - mx) * (p[1] - my) for p in pairs)
+    return round(sxy / (sxx ** 0.5 * syy ** 0.5), 3)
+
+
+def _mono_violations(score_to_ret30):
+    """score別 avg_ret30 を昇順に並べ、高scoreの平均が低scoreより低い逆転ペア数。"""
+    pts = sorted((s, r) for s, r in score_to_ret30.items() if r is not None)
+    v = 0
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            if pts[j][1] < pts[i][1]:   # 高score(j) の ret30 が 低score(i) より低い
+                v += 1
+    return v
+
+
+def _group_grade(rows, score_key):
+    """rows(=[(score, ret30, vs_spy30)]) の high(>=4)/low(<=-4) 集計。"""
+    high = [r for r in rows if r[0] >= SIM_HIGH]
+    low = [r for r in rows if r[0] <= SIM_LOW]
+
+    def g(lst):
+        return {"n": len(lst),
+                "avg_ret30": _avg([r[1] for r in lst]),
+                "avg_vs_spy30": _avg([r[2] for r in lst])}
+    return g(high), g(low)
+
+
+def _score_table(before_rows, after_rows):
+    """score(-5..+5)別の before/after 件数・平均ret30・平均vs_spy30。"""
+    def by_score(rows):
+        d = {}
+        for s, r30, vs in rows:
+            d.setdefault(s, []).append((r30, vs))
+        return d
+    b, a = by_score(before_rows), by_score(after_rows)
+    table = []
+    for sc in range(-5, 6):
+        bl, al = b.get(sc, []), a.get(sc, [])
+        if not bl and not al:
+            continue
+        table.append({
+            "score": sc,
+            "before_n": len(bl), "before_avg_ret30": _avg([x[0] for x in bl]),
+            "before_avg_vs_spy30": _avg([x[1] for x in bl]),
+            "after_n": len(al), "after_avg_ret30": _avg([x[0] for x in al]),
+            "after_avg_vs_spy30": _avg([x[1] for x in al])})
+    return table
+
+
+def simulate_corrections(records=None, candidates=None):
+    """承認済み score_correction を過去較正データに仮適用し、補正前後の成績を比較（表示のみ）。
+    ⚠️ 較正JSONは改変しない（simulated_impact_score は返り値・メモリ上のみ）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    candidates は approved な score_correction を views 側から注入（循環import回避）。"""
+    recs = records if records is not None else load()
+    if not isinstance(recs, list):
+        recs = []
+    cands = candidates or []
+
+    # approved score_correction を target 別に整理
+    impact_map, category_deltas = {}, {}
+    sentiment_approved = 0
+    for c in cands:
+        if c.get("type") != "score_correction" or c.get("status") != "approved":
+            continue
+        tgt = c.get("target")
+        if tgt == "impact":
+            cur, rec = c.get("current_score"), c.get("recommended_score")
+            if isinstance(cur, int) and isinstance(rec, int):
+                impact_map[cur] = rec
+        elif tgt == "category":
+            d = c.get("delta")
+            if isinstance(d, int) and c.get("label"):
+                category_deltas[c["label"]] = category_deltas.get(c["label"], 0) + d
+        elif tgt == "sentiment":
+            sentiment_approved += 1
+    approved_count = len(impact_map) + len(category_deltas)
+
+    # 対象: status==updated & ret_30!=None & impact_score!=None
+    eligible = [r for r in recs if r.get("status") == "updated"
+                and r.get("ret_30") is not None and isinstance(r.get("impact_score"), int)]
+    eligible_n = len(eligible)
+
+    before_rows, after_rows = [], []
+    applicable_news = 0
+    for r in eligible:
+        base = r["impact_score"]
+        sim = _simulated_score(base, r.get("categories"), impact_map, category_deltas)
+        if sim != base:
+            applicable_news += 1
+        before_rows.append((base, r.get("ret_30"), r.get("vs_spy_30")))
+        after_rows.append((sim, r.get("ret_30"), r.get("vs_spy_30")))
+
+    def _block(rows):
+        corr_ret30 = _pearson([x[0] for x in rows], [x[1] for x in rows])
+        corr_vs = _pearson([x[0] for x in rows], [x[2] for x in rows])
+        s2r = {}
+        for s, r30, _vs in rows:
+            s2r.setdefault(s, []).append(r30)
+        s2avg = {s: _avg(v) for s, v in s2r.items()}
+        high, low = _group_grade(rows, 0)
+        return {"corr_ret30": corr_ret30, "corr_vs_spy30": corr_vs,
+                "mono_violations": _mono_violations(s2avg), "high": high, "low": low}
+
+    before, after = _block(before_rows), _block(after_rows)
+    table = _score_table(before_rows, after_rows)
+
+    # ---- 判定 ----
+    reasons = []
+    if eligible_n < SIM_MIN_ELIGIBLE or approved_count == 0 or applicable_news < 3:
+        verdict = "サンプル不足"
+        if eligible_n < SIM_MIN_ELIGIBLE:
+            reasons.append(f"対象ニュース {eligible_n}件 < {SIM_MIN_ELIGIBLE}")
+        if approved_count == 0:
+            reasons.append("承認済み補正案が0件")
+        if applicable_news < 3:
+            reasons.append(f"補正が変化を与えたニュース {applicable_news}件 < 3")
+    else:
+        d_corr = (after["corr_ret30"] - before["corr_ret30"]
+                  if (after["corr_ret30"] is not None and before["corr_ret30"] is not None) else None)
+        d_mono = after["mono_violations"] - before["mono_violations"]
+        bh, ah = before["high"]["avg_vs_spy30"], after["high"]["avg_vs_spy30"]
+        d_high = (ah - bh if (ah is not None and bh is not None) else None)
+
+        improved = ((d_corr is not None and d_corr >= 0.05) or (d_mono < 0)
+                    or (d_high is not None and d_high >= 2))
+        worsened = ((d_corr is not None and d_corr <= -0.05) or (d_mono > 0)
+                    or (d_high is not None and d_high <= -2))
+        # 改善と悪化が同時成立 → 保守的に悪化優先
+        if worsened:
+            verdict = "悪化"
+        elif improved:
+            verdict = "改善"
+        else:
+            verdict = "変化なし"
+
+        if d_corr is not None:
+            reasons.append(f"ret30相関 {before['corr_ret30']:+.3f} → {after['corr_ret30']:+.3f}（{d_corr:+.3f}）")
+        reasons.append(f"単調性違反 {before['mono_violations']} → {after['mono_violations']}")
+        if d_high is not None:
+            reasons.append(f"high impact vsSPY30 {bh:+.1f}% → {ah:+.1f}%（{d_high:+.1f}pt）")
+        if improved and worsened:
+            reasons.append("改善・悪化が同時成立 → 保守的に「悪化」と判定")
+
+    return {
+        "approved_count": approved_count, "sentiment_approved": sentiment_approved,
+        "applicable_news": applicable_news, "eligible_n": eligible_n,
+        "before": before, "after": after, "table": table,
+        "verdict": verdict, "reasons": reasons}

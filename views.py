@@ -666,6 +666,72 @@ def _render_news_score_corrections():
                        "※本番スコアには反映しません。")
     st.caption("保存した補正案は下の「📋 ニュース採用候補」に score_correction として表示されます。")
 
+    # 🧪 v30: 承認済み補正案のシミュレーション検証（表示のみ・本番非反映）
+    _render_news_correction_simulation()
+
+
+_SIM_VERDICT_COLOR = {"改善": "#16a34a", "変化なし": "#64748b", "悪化": "#dc2626", "サンプル不足": "#eab308"}
+
+
+def _render_news_correction_simulation():
+    """v30: 承認済み score_correction を過去較正データに仮適用して検証（表示のみ・本番非反映）。"""
+    st.divider()
+    st.subheader("🧪 ニュース補正シミュレーション")
+    # approved な score_correction のみ news_adoption から抽出して注入（循環import回避）
+    cands = [c for c in nadopt_mod.list_all()
+             if c.get("type") == "score_correction" and c.get("status") == "approved"]
+    sim = ncal_mod.simulate_corrections(candidates=cands)
+
+    def _f(v):
+        return (f"{v:+.1f}%" if isinstance(v, (int, float)) else "—")
+
+    def _c(v):
+        return (f"{v:+.3f}" if isinstance(v, (int, float)) else "—")
+
+    vc = _SIM_VERDICT_COLOR.get(sim["verdict"], "#64748b")
+    m = st.columns(4)
+    m[0].metric("承認済み補正案", sim["approved_count"])
+    m[1].metric("適用対象ニュース", sim["applicable_news"])
+    m[2].metric("対象n(eligible)", sim["eligible_n"])
+    m[3].metric("sentiment未適用", sim["sentiment_approved"])
+    st.markdown(f'判定：<b style="color:{vc};">{sim["verdict"]}</b>', unsafe_allow_html=True)
+    if sim["sentiment_approved"]:
+        st.caption(f"承認済み sentiment 評価 {sim['sentiment_approved']}件（数値補正なしのため未適用）")
+
+    if sim["verdict"] == "サンプル不足":
+        st.warning("サンプルが少ないため判定できません（参考値）。まだニューススコアには反映しないでください。")
+
+    b, a = sim["before"], sim["after"]
+    comp = pd.DataFrame([
+        {"指標": "ret30相関", "before": _c(b["corr_ret30"]), "after": _c(a["corr_ret30"])},
+        {"指標": "vsSPY30相関", "before": _c(b["corr_vs_spy30"]), "after": _c(a["corr_vs_spy30"])},
+        {"指標": "単調性違反数", "before": b["mono_violations"], "after": a["mono_violations"]},
+        {"指標": "high impact n", "before": b["high"]["n"], "after": a["high"]["n"]},
+        {"指標": "high avg_ret30", "before": _f(b["high"]["avg_ret30"]), "after": _f(a["high"]["avg_ret30"])},
+        {"指標": "high avg_vsSPY30", "before": _f(b["high"]["avg_vs_spy30"]), "after": _f(a["high"]["avg_vs_spy30"])},
+        {"指標": "low impact n", "before": b["low"]["n"], "after": a["low"]["n"]},
+        {"指標": "low avg_ret30", "before": _f(b["low"]["avg_ret30"]), "after": _f(a["low"]["avg_ret30"])},
+        {"指標": "low avg_vsSPY30", "before": _f(b["low"]["avg_vs_spy30"]), "after": _f(a["low"]["avg_vs_spy30"])},
+    ])
+    st.markdown("**補正前 / 補正後 比較**")
+    st.dataframe(comp, width='stretch', hide_index=True)
+
+    if sim["table"]:
+        st.markdown("**score別 before / after**")
+        rows = [{
+            "score": t["score"],
+            "before_n": t["before_n"], "before_ret30": _f(t["before_avg_ret30"]),
+            "before_vsSPY30": _f(t["before_avg_vs_spy30"]),
+            "after_n": t["after_n"], "after_ret30": _f(t["after_avg_ret30"]),
+            "after_vsSPY30": _f(t["after_avg_vs_spy30"]),
+        } for t in sim["table"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+
+    if sim["reasons"]:
+        for r in sim["reasons"]:
+            st.caption("・" + r)
+    st.info("これはシミュレーション表示のみで、本番ニューススコアには反映していません。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
