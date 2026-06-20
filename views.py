@@ -589,9 +589,7 @@ def _render_news_calibration_analytics():
 
         # 📌 v27.2: 検証候補として保存（本番非反映）
         _render_news_adoption()
-
-        # 🔐 v42: 本番反映ステータス（候補有無に依らず常に表示・apply 関数なし・本番非接続）
-        _render_production_overrides_status()
+        # 注: 本番反映ステータス〜作成フローは render_stock から top-level で呼ぶ（v51-A）。
 
 
 def _render_news_score_corrections():
@@ -1330,8 +1328,39 @@ def _render_production_data_creation_plan():
         })
     st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
 
-    st.info("これは作業手順の表示のみです。**データもスイッチも変更しません。"
-            "実行は既存UIまたは手動で行ってください（実行ボタンは v51 以降）。**")
+    # 🟢 v51-A: 低リスク前半2ステップ（save_calibration / update_returns）のみ実行ボタンを提供。
+    #    safe_to_run=True のときだけ表示。本番スコア・ランキング・overrides・flags・switch には触れない。
+    steps = {s["id"]: s for s in plan["steps"]}
+    s1, s2 = steps.get("save_calibration", {}), steps.get("update_returns", {})
+
+    if s1.get("safe_to_run"):
+        st.markdown("**Step1: ニュース較正データを保存**")
+        default_t = st.session_state.get("_calib_flow_ticker", "")
+        t = st.text_input("ティッカー（較正データ保存先）", value=default_t, key="calib_flow_ticker_input").strip().upper()
+        if st.button("📥 Step1: 較正データを保存", key="calib_flow_save", width='stretch'):
+            if not t:
+                st.warning("ティッカーを入力してください。")
+            else:
+                with st.spinner(f"{t} のニュースを取得・保存中…"):
+                    ok, msg = ncal_mod.add_for_ticker(t)
+                (st.success if ok else st.warning)(msg)
+                if ok:
+                    st.rerun()
+
+    if s2.get("safe_to_run"):
+        st.markdown("**Step2: 較正リターンを更新（ret_7 / ret_30）**")
+        _chk = nadopt_mod.production_data_checklist()
+        st.caption(f"対象 ret_30 件数：{_chk['calibration']['ret30_count']} / 必要 {_chk['min_ret30_required']}"
+                   "（30営業日経過後に増えます）")
+        if st.button("🔄 Step2: リターンを更新", key="calib_flow_update", width='stretch'):
+            with st.spinner("価格履歴からリターンを計算中…"):
+                n = ncal_mod.update_returns()
+            st.success(f"{n} 件のリターンを更新しました（mock/失敗は unavailable）。")
+            st.rerun()
+
+    st.info("v51-A では Step1/Step2（較正データ保存・リターン更新）のみ実行できます。"
+            "**較正データJSONのみ更新し、本番スコア・発掘ランキング・overrides・flags・スイッチには一切触れません。**"
+            "Step3以降は既存UIまたは手動で実行してください。")
 
 
 # ============================================================ 個別銘柄分析
@@ -1379,7 +1408,11 @@ def render_stock(rmap, watch=None, positions=None):
     _render_scenario_forecast(r, sel, f, psrc, positions)
     _render_sec_edgar(sel, f)
     _render_news_calibration(sel)
+    st.session_state["_calib_flow_ticker"] = sel  # v51-A: 実データ作成フローの ticker 既定値
     _render_news_calibration_analytics()
+    # v51-A: 本番反映ステータス〜実データ作成フローは較正データの有無に依らず常に表示
+    # （analytics エクスパンダーの early-return の影響を受けないよう top-level で描画）。
+    _render_production_overrides_status()
 
     st.subheader("🧮 スコアの理由（なぜこの点数か）")
     W = config.SCORE_WEIGHTS
