@@ -29,6 +29,28 @@ _MID = ["決算", "ガイダンス", "受注", "新製品", "工場", "需要", 
 _SHORT = ["引き上げ", "引き下げ", "格上げ", "格下げ", "急騰", "急落", "upgrade", "downgrade", "surge", "plunge", "target"]
 
 
+# v35: overrides を「読むだけ」。enabled=false でも true でも絶対に適用しない（safety mode）。
+# ⚠️ impact_overrides / category_adjustments / sentiment_notes は一切使用しない。
+#    ニューススコア・発掘スコア・ランキングは1点も変更しない。スコア計算経路から呼ばない。
+def load_overrides_safe():
+    """news_score_overrides.json の状態を読むだけ。適用は禁止（v35 safety mode）。
+    返り値は load_overrides_status() の dict（無/壊れでも落ちない）。スコアは変更しない。"""
+    try:
+        # 循環import回避のため関数内で import（news_adoption → news_calibration → news）。
+        from modules import news_adoption
+        status = news_adoption.load_overrides_status()
+    except Exception:
+        return {"exists": False, "enabled": False, "status": "missing", "config": None}
+    if not status.get("exists"):
+        return status
+    if not status.get("enabled"):
+        return status
+    # enabled=true でも v35 では適用しない（読み込んだだけ・スコア非変更）。
+    # "Overrides loaded but not applied (v35 safety mode)"
+    # impact_overrides / category_adjustments / sentiment_notes は使用しない。
+    return status
+
+
 def news_status() -> dict:
     fh = bool(config.get_secret("FINNHUB_API_KEY"))
     oa = bool(config.get_secret("OPENAI_API_KEY"))

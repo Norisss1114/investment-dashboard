@@ -545,6 +545,23 @@ def load_overrides_config():
     return cfg if isinstance(cfg, dict) else None
 
 
+# ---------------- v35: overrides の状態を返す（読むだけ・適用しない） ----------------
+def load_overrides_status():
+    """news_score_overrides.json の状態を返す（読み取りのみ・適用しない・非改変）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    status: missing(ファイル無/読込不可) / disabled(enabled=false) / enabled(enabled=true)。
+    壊れたJSONでも落ちない。"""
+    if not os.path.exists(OVERRIDES_PATH):
+        return {"exists": False, "enabled": False, "status": "missing", "config": None}
+    cfg = load_overrides_config()  # 壊れJSONは None
+    if not isinstance(cfg, dict):
+        # ファイルはあるが読めない → 安全側（未適用）に倒す
+        return {"exists": True, "enabled": False, "status": "missing", "config": None}
+    enabled = bool(cfg.get("enabled"))
+    return {"exists": True, "enabled": enabled,
+            "status": ("enabled" if enabled else "disabled"), "config": cfg}
+
+
 # ---------------- v34: overrides 設定ファイルの安全プレビュー（読み取り表示のみ・本番非反映） ----------------
 def preview_overrides_config():
     """news_score_overrides.json を読み、プレビュー用に正規化（読み取りのみ・非改変）。

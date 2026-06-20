@@ -818,6 +818,8 @@ def _render_overrides_generator():
 
     # 🧾 v34: 生成済み overrides の安全プレビュー（読み取り表示のみ・本番非反映）
     _render_overrides_preview()
+    # 🧩 v35: overrides 読み込み状態（読むだけ・未適用・本番非反映・状態に依らず常に表示）
+    _render_overrides_status()
 
 
 def _render_overrides_preview():
@@ -886,6 +888,35 @@ def _render_overrides_preview():
         f'high vsSPY30Δ {_f(ss.get("high_vs_spy30_delta"))}')
 
     st.info("この画面はプレビューのみです。本番ニューススコアには反映していません。")
+
+
+def _render_overrides_status():
+    """v35: news.py が overrides を読み込めるが未適用であることを表示（safety mode）。"""
+    st.divider()
+    st.subheader("🧩 News Overrides Status")
+    # news.py 経由で「読むだけ」（適用しない）。スコアには一切影響しない。
+    status = news_mod.load_overrides_safe()
+    cfg = status.get("config") or {}
+    imp_n = len(cfg.get("impact_overrides") or {})
+    cat_n = len(cfg.get("category_adjustments") or {})
+    sen_n = len(cfg.get("sentiment_notes") or {})
+
+    st.markdown(f'- file exists：**{status.get("exists")}**')
+    st.markdown(f'- enabled：**{str(status.get("enabled")).lower()}**')
+    st.markdown(f'- status：**{status.get("status")}**')
+    st.markdown(f'- impact override count：**{imp_n}**')
+    st.markdown(f'- category adjustment count：**{cat_n}**')
+    st.markdown(f'- sentiment note count：**{sen_n}**')
+
+    s = status.get("status")
+    if s == "missing":
+        st.info("overridesファイルは存在しません。")
+    elif s == "disabled":
+        st.success("enabled=false のため未適用です。")
+    else:  # enabled
+        st.warning("enabled=true ですが v35 Safety Mode により未適用です。")
+
+    st.info("v35 は overrides を読み込むだけです。**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
