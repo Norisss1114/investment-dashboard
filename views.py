@@ -1181,7 +1181,36 @@ def _render_production_overrides_status():
         for r in s["reasons"]:
             st.caption("・" + r)
 
-    st.info("v43時点でも本番適用関数は存在しません。これは状態表示のみです。"
+    st.info("これは状態表示のみです。"
+            "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
+
+    # 🧯 v44: Apply関数の安全テスト（サンプルのみ・本番値は使わない・絶対未適用）
+    _render_apply_safety_test()
+
+
+def _render_apply_safety_test():
+    """v44: apply_news_overrides_if_allowed() の安全挙動をサンプルで検証表示（本番非接続）。"""
+    st.divider()
+    st.subheader("🧯 Apply関数安全テスト")
+    # 表示用サンプル（本番 news_sum は使わない）。ネスト(categories/reasons)を含める
+    sample = {"avg_impact": 2.0, "score": 14.0,
+              "categories": {"チャンス": 2, "危険": 1},
+              "reasons": ["平均インパクト +2.0（-5〜+5）"]}
+    res = nadopt_mod.apply_news_overrides_if_allowed(sample)
+    out = res["news_sum"]
+
+    returned_same_as_input = (out == sample)
+    returned_is_deepcopy = (out is not sample
+                            and out.get("categories") is not sample["categories"]
+                            and out.get("reasons") is not sample["reasons"])
+
+    st.markdown(f'- apply関数あり：**{hasattr(nadopt_mod, "apply_news_overrides_if_allowed")}**')
+    st.markdown(f'- status.allow：**{res["status"]["allow"]}**')
+    st.markdown(f'- applied：**{res["applied"]}**')
+    st.markdown(f'- reason：{res["reason"]}')
+    st.markdown(f'- returned_same_as_input：**{returned_same_as_input}**')
+    st.markdown(f'- returned_is_deepcopy：**{returned_is_deepcopy}**')
+    st.info("v44では apply 関数は足場のみで、applied は常に False です。"
             "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
 

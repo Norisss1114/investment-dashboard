@@ -13,6 +13,7 @@ v27.1 の news_calibration.analytics()/recommendation() が出す
 保存先: user_data/news_adoption_candidates.json（壊れても落ちない）。
 候補抽出は recommendation()/analytics() の構造化データから組み立てる（文字列パースしない）。
 """
+import copy
 import datetime as dt
 import hashlib
 import json
@@ -1282,3 +1283,24 @@ def get_production_overrides_status():
     return {"allow": allow, "gates": gates, "reasons": reasons, "summary": summary,
             "current_fingerprint": current_fp, "candidate_fingerprint": candidate_fp,
             "fingerprint_match": fingerprint_match}
+
+
+# ---------------- v44: 本番適用関数の足場（switch OFF で絶対未適用・本番非接続） ----------------
+def apply_news_overrides_if_allowed(news_sum):
+    """news_sum に overrides を適用…する“足場”。⚠️ v44 では絶対に適用しない（applied=False 固定）。
+    本番ニューススコア・発掘スコア・ランキングには一切反映しない。news.py からは未接続。
+    必ず deep copy を返し、元の news_sum（categories/reasons のネスト含む）を破壊しない。
+    None / 非dict でも落ちない。"""
+    copied = copy.deepcopy(news_sum) if isinstance(news_sum, dict) else {}
+    status = get_production_overrides_status()
+
+    if not status.get("allow"):
+        return {"news_sum": copied, "applied": False,
+                "reason": "Production overrides not allowed", "status": status}
+
+    # ⚠️ allow=True に到達しても v44 では意図的に未適用（足場のみ）。
+    # TODO(v45+): allow=True かつ本番解禁時のみ、avg_impact を overrides で調整し
+    #             reasons に「overrides適用」を追加、score を再計算する（今回は実装しない）。
+    return {"news_sum": copied, "applied": False,
+            "reason": "Production overrides application is intentionally disabled in v44 safety mode",
+            "status": status}
