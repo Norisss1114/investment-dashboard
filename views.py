@@ -1439,9 +1439,30 @@ def _render_production_data_creation_plan():
                    "enabled=true 化（Step5 完了）は別判断・別PRです。preview/fingerprint/freshness の詳細は "
                    "上の「📝 ニューススコア設定ファイル生成」セクションで確認できます。")
 
-    st.info("v51-C では Step1〜Step5（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成）まで実行できます。"
+    # 🔒 v52: Step6（approve_production_apply_candidate）は案内表示のみ（実行導線なし）。
+    #    overrides.enabled=true が前提だが、本フローは enabled=false 固定のため Step6 は実行不可。
+    #    保存/承認/flags/enabled 操作は一切しない。enabled=true 化は別PR・別判断。
+    _s6 = steps.get("approve_production_apply_candidate", {})
+    if _s6.get("status") in ("todo", "blocked"):
+        st.markdown("**Step6: production_apply_candidate を保存・承認（🔒 現状は実行不可）**")
+        _ov6 = nadopt_mod.load_overrides_config()
+        _ov6_enabled = bool(_ov6.get("enabled")) if isinstance(_ov6, dict) else False
+        st.caption(f"前提：overrides.enabled == true（現在：enabled={str(_ov6_enabled).lower()}）")
+        st.warning("Step6 は overrides.enabled=true が前提です。"
+                   "本フローの generate_overrides_config() は **enabled=false 固定**で生成するため、"
+                   "現状 Step6 は **blocked（実行不可）** です。"
+                   "v52 では Step6 の保存・承認ボタンは追加しません（案内表示のみ）。")
+        st.caption("・enabled=true 化は**別PR・別判断**です（本フローでは行いません）。"
+                   "・これは overrides 個別の enabled フラグであり、本番グローバルスイッチ "
+                   "PRODUCTION_NEWS_OVERRIDES_ENABLED（False固定）とは**別レイヤ**です。"
+                   "・本番ON（スイッチ変更）はまだ行いません。"
+                   "・Step6 を有効化した場合の保存/承認は、従来どおり既存の "
+                   "「🧪 発掘ランキング実験プレビュー」と「📋 ニュース採用候補」で行います。")
+
+    st.info("v52 では Step1〜Step5（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認・overrides生成）まで実行できます。"
             "**candidates / 較正データ / overrides(enabled=false) JSON のみ更新し、本番スコア・発掘ランキング・flags・スイッチには一切触れません。**"
-            "score_correction の承認は「📋 ニュース採用候補」で個別に、Step6以降は既存UIまたは手動で実行してください。")
+            "score_correction の承認は「📋 ニュース採用候補」で個別に行ってください。"
+            "Step6 は overrides.enabled=true（別PR・別判断）が前提のため案内表示のみ、Step7以降は既存UIまたは手動で実行してください。")
 
 
 # ============================================================ 個別銘柄分析
