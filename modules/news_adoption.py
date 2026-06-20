@@ -1292,6 +1292,13 @@ def apply_news_overrides_if_allowed(news_sum):
     必ず deep copy を返し、元の news_sum（categories/reasons のネスト含む）を破壊しない。
     None / 非dict でも落ちない。"""
     copied = copy.deepcopy(news_sum) if isinstance(news_sum, dict) else {}
+
+    # v45: グローバルスイッチ OFF なら status 評価（JSON読込）をスキップして即 return（ホットパス軽量化）。
+    if not PRODUCTION_NEWS_OVERRIDES_ENABLED:
+        return {"news_sum": copied, "applied": False,
+                "reason": "Production overrides disabled by global switch",
+                "status": {"allow": False}}
+
     status = get_production_overrides_status()
 
     if not status.get("allow"):

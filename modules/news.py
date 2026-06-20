@@ -126,8 +126,20 @@ def summarize(items: list) -> dict:
         reasons.append(f"未織り込みの可能性 {cats['未織り込み']}件")
     reasons.append(f"平均インパクト {avg_impact:+.1f}（-5〜+5）")
 
-    return {"bull": bull, "bear": bear, "neutral": neu, "score": round(score, 1),
-            "avg_impact": round(avg_impact, 1), "categories": cats, "reasons": reasons}
+    news_sum = {"bull": bull, "bear": bear, "neutral": neu, "score": round(score, 1),
+                "avg_impact": round(avg_impact, 1), "categories": cats, "reasons": reasons}
+
+    # v45: 本番反映ゲートに接続（switch OFF のため必ず未適用＝内容は完全一致）。
+    # 関数ローカル import で循環回避。apply 側で例外が出ても通常 news_sum を返す（本番分析を落とさない）。
+    # news_sum には metadata を一切混ぜない（スコア計算に影響させない）。
+    try:
+        from modules import news_adoption as nadopt
+        res = nadopt.apply_news_overrides_if_allowed(news_sum)
+        if isinstance(res, dict) and isinstance(res.get("news_sum"), dict):
+            return res["news_sum"]
+    except Exception:
+        pass
+    return news_sum
 
 
 # ---------------- 内部 ----------------

@@ -1317,6 +1317,10 @@ def render_news(rmap, watch=None, positions=None):
     c[4].metric("🚨 危険", cats.get("危険", 0))
     st.metric("ニュース総合インパクト（-5〜+5の平均）", f'{summ.get("avg_impact",0):+.1f}', f'スコア {summ["score"]}/20')
 
+    # 🔐 v45: 本番反映ゲート接続済み（switch OFF のため未適用＝スコア不変）の明示。news_sum 非依存で導出。
+    _prod_allow = nadopt_mod.get_production_overrides_status()["allow"]
+    st.caption(f"Production override applied: {_prod_allow}（switch OFF・本番ニューススコアは未変更）")
+
     if news.get("key_missing"):
         st.caption("※下記はサンプル見出しです（APIキー未設定）。")
 
