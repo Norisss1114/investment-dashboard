@@ -1213,6 +1213,34 @@ def _render_apply_safety_test():
     st.info("v44では apply 関数は足場のみで、applied は常に False です。"
             "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
+    # ✅ v47: 本番ON前の最終チェックリスト（判定・表示のみ・switch は OFF のまま）
+    _render_production_on_readiness()
+
+
+def _render_production_on_readiness():
+    """v47: 本番スイッチ ON 前の準備チェックリスト（表示のみ・switch 不変）。"""
+    st.divider()
+    st.subheader("✅ 本番ON前チェックリスト")
+    chk = nadopt_mod.production_on_readiness_check()
+    ready = chk["ready_for_switch_on"]
+    color = "#16a34a" if ready else "#dc2626"
+    st.markdown(f'ready_for_switch_on：<b style="color:{color};font-size:1.05rem;">{ready}</b>',
+                unsafe_allow_html=True)
+
+    st.markdown("**チェックリスト**")
+    for it in chk["items"]:
+        mark = "✅" if it["ok"] else "❌"
+        st.markdown(f'{mark} {it["label"]}：{it["value"]}')
+
+    if chk["blocking_reasons"]:
+        st.markdown("**未充足項目**")
+        for r in chk["blocking_reasons"]:
+            st.caption("・" + r)
+
+    st.markdown(f'**次のアクション**：{chk["next_action"]}')
+    st.info("v47では本番スイッチはOFFのままです。これはON前の準備確認のみです。"
+            "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
+
 
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):

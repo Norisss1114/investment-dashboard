@@ -1369,3 +1369,77 @@ def apply_news_overrides_if_allowed(news_sum):
     return {"news_sum": adjusted, "applied": True,
             "reason": "Production overrides applied (approximate, avg_impact based)",
             "status": status, "debug": debug}
+
+
+# ---------------- v47: 本番ON前の最終チェックリスト（判定・表示のみ・switch は OFF のまま） ----------------
+_NEWS_SUM_METADATA_KEYS = ("applied", "status", "debug", "production_status", "override_status")
+
+
+def production_on_readiness_check():
+    """本番スイッチを ON にする前の準備が整っているかを12項目で点検（判定・表示のみ・本番非接続）。
+    ⚠️ PRODUCTION_NEWS_OVERRIDES_ENABLED は変更しない。本番データは使わず表示用サンプルで検証。
+    ready_for_switch_on = (switch が False) かつ (他の全項目 ok)。switch True は v47 上 NG。"""
+    s = get_production_overrides_status()
+    summary = s.get("summary", {}) or {}
+
+    # 表示用サンプル（本番データ不使用）で apply の安全挙動を検証（項目8/9/12）
+    sample = {"bull": 1, "bear": 0, "neutral": 0, "score": 14.0, "avg_impact": 2.0,
+              "categories": {"チャンス": 1}, "reasons": ["sample"]}
+    sample_snapshot = copy.deepcopy(sample)
+    apply_exists = callable(globals().get("apply_news_overrides_if_allowed"))
+    logic_installed = callable(globals().get("_apply_overrides_to_news_sum"))
+    no_apply_error = True
+    sample_unchanged = False
+    sample_is_deepcopy = False
+    no_metadata = False
+    try:
+        res = apply_news_overrides_if_allowed(sample)
+        out = res.get("news_sum") if isinstance(res, dict) else None
+        applied_false = (isinstance(res, dict) and res.get("applied") is False)
+        sample_unchanged = (out == sample) and applied_false
+        sample_is_deepcopy = (isinstance(out, dict) and out is not sample
+                              and out.get("categories") is not sample["categories"]
+                              and out.get("reasons") is not sample["reasons"])
+        no_metadata = isinstance(out, dict) and not any(k in out for k in _NEWS_SUM_METADATA_KEYS)
+    except Exception:
+        no_apply_error = False
+    # サンプルは破壊されてはいけない
+    if sample != sample_snapshot:
+        sample_unchanged = False
+
+    switch_off = (PRODUCTION_NEWS_OVERRIDES_ENABLED is False)
+    connected = apply_exists and sample_unchanged and no_metadata
+
+    items = [
+        {"label": "production_guard ready", "ok": summary.get("guard_decision") == "反映準備OK",
+         "value": summary.get("guard_decision")},
+        {"label": "fingerprint match", "ok": summary.get("fingerprint_match") is True,
+         "value": summary.get("fingerprint_match")},
+        {"label": "approved production_apply_candidate", "ok": summary.get("approved_candidate_exists") is True,
+         "value": summary.get("approved_candidate_exists")},
+        {"label": "freshness OK", "ok": summary.get("freshness_ok") is True,
+         "value": summary.get("freshness_ok")},
+        {"label": "production flags confirmed", "ok": summary.get("production_apply_confirmed") is True,
+         "value": summary.get("production_apply_confirmed")},
+        {"label": "production switch currently OFF", "ok": switch_off, "value": PRODUCTION_NEWS_OVERRIDES_ENABLED},
+        {"label": "apply function exists", "ok": apply_exists, "value": apply_exists},
+        {"label": "news.py summarize connected", "ok": connected, "value": connected},
+        {"label": "current production output unchanged", "ok": (sample_unchanged and sample_is_deepcopy),
+         "value": (sample_unchanged and sample_is_deepcopy)},
+        {"label": "apply logic installed", "ok": logic_installed, "value": logic_installed},
+        {"label": "overrides enabled", "ok": summary.get("overrides_enabled") is True,
+         "value": summary.get("overrides_enabled")},
+        {"label": "no apply error", "ok": no_apply_error, "value": no_apply_error},
+    ]
+
+    blocking_reasons = [f'{it["label"]} is not ready' for it in items if not it["ok"]]
+    ready_for_switch_on = switch_off and all(it["ok"] for it in items)
+
+    if ready_for_switch_on:
+        next_action = ("全条件は揃っています。次は別PRで PRODUCTION_NEWS_OVERRIDES_ENABLED を "
+                       "True にする判断ができます。")
+    else:
+        next_action = "不足項目を解消してから本番ONを検討してください。"
+
+    return {"ready_for_switch_on": ready_for_switch_on, "items": items,
+            "blocking_reasons": blocking_reasons, "next_action": next_action}
