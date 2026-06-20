@@ -732,6 +732,15 @@ def _render_news_correction_simulation():
             st.caption("・" + r)
     st.info("これはシミュレーション表示のみで、本番ニューススコアには反映していません。")
 
+    # 📌 v31: 改善時のみ「本番反映候補」として保存（本番非反映・status控えのみ）
+    can_save = (sim["verdict"] == "改善" and sim["approved_count"] > 0
+                and sim["applicable_news"] >= 3 and sim["eligible_n"] >= 10)
+    if can_save:
+        if st.button("📌 シミュレーション結果を本番反映候補に保存", key="nsim_save", width='stretch'):
+            ok, msg = nadopt_mod.save_simulation_result(sim)
+            (st.success if ok else st.warning)(msg + "（※本番スコアには反映しません）")
+        st.caption("保存結果は下の「📋 ニュース採用候補」に simulation_result として表示されます。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
@@ -761,7 +770,27 @@ def _render_news_adoption():
             ev = c.get("evidence", {}) or {}
             color = _NADOPT_STATUS_COLOR.get(c.get("status"), "#64748b")
             n_val = ev.get("n", ev.get("sample_size"))  # v29=n / v27.2=sample_size
-            if c.get("type") == "score_correction":
+            if c.get("type") == "simulation_result":
+                # v31: シミュレーション結果行（verdict/improvement/規模を表示）
+                imp = c.get("improvement", {}) or {}
+
+                def _d(v, suf=""):
+                    return (f"{v:+.3f}" if isinstance(v, float) else (f"{v:+d}" if isinstance(v, int) else "—")) + (suf if v is not None and not isinstance(v, bool) else "")
+
+                st.markdown(
+                    f'<div style="font-size:0.95rem;">'
+                    f'<b>[simulation_result]</b> {c.get("label")} — 判定 {c.get("verdict")}'
+                    f'　<b style="color:{color};">{c.get("status")}</b></div>',
+                    unsafe_allow_html=True)
+                st.caption(
+                    f'承認補正 {c.get("approved_correction_count")} / 適用 {c.get("applicable_news")} / '
+                    f'eligible {c.get("eligible_n")} ｜ '
+                    f'相関Δ {_d(imp.get("corr_ret30_delta"))} / 単調性違反Δ {_d(imp.get("mono_violations_delta"))} / '
+                    f'high vsSPY30Δ {_d(imp.get("high_vs_spy30_delta"),"pt")} ｜ '
+                    f'作成 {c.get("created_at","—")} ／ 更新 {c.get("updated_at","—")}')
+                for rsn in (c.get("reasons") or [])[:6]:
+                    st.caption("・" + rsn)
+            elif c.get("type") == "score_correction":
                 # v29: score_correction 行（target/推奨score/delta を表示）
                 cs = c.get("current_score")
                 rs = c.get("recommended_score")

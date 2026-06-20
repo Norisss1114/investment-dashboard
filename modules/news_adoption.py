@@ -107,9 +107,13 @@ def build_candidates(records=None):
 
 
 # ---------------- 追加（dedup・status保持） ----------------
-# score_correction(v29) で追加される任意フィールド。存在する時だけ保存/更新する
-# （v27.2 候補はこれらを持たないので shape は不変）。
-_OPTIONAL_FIELDS = ("target", "recommended_score", "delta", "reason")
+# 任意フィールド。存在する時だけ保存/更新する（持たない候補の shape は不変）。
+#   score_correction(v29): target/recommended_score/delta/reason
+#   simulation_result(v31): source/verdict/approved_correction_count/applicable_news/
+#                           eligible_n/before/after/improvement/reasons
+_OPTIONAL_FIELDS = ("target", "recommended_score", "delta", "reason",
+                    "source", "verdict", "approved_correction_count", "applicable_news",
+                    "eligible_n", "before", "after", "improvement", "reasons")
 
 
 def _upsert(cand):
@@ -264,3 +268,55 @@ def save_score_corrections(records=None):
         else:
             updated += 1
     return len(cands), created, updated
+
+
+# ---------------- v31: シミュレーション結果を本番反映候補として保存（保存のみ・本番非反映） ----------------
+def _simulation_cand_id():
+    """simulation_result の固定id（1件に集約・最新で上書き）。"""
+    return "simulation_result|news_score_corrections"
+
+
+def _improvement(sim):
+    """before/after から改善量を算出。None があれば None。"""
+    b, a = sim.get("before", {}) or {}, sim.get("after", {}) or {}
+
+    def _sub(x, y):
+        return (round(x - y, 3) if (isinstance(x, (int, float)) and isinstance(y, (int, float))) else None)
+
+    bh = (b.get("high") or {}).get("avg_vs_spy30")
+    ah = (a.get("high") or {}).get("avg_vs_spy30")
+    return {
+        "corr_ret30_delta": _sub(a.get("corr_ret30"), b.get("corr_ret30")),
+        "mono_violations_delta": _sub(a.get("mono_violations"), b.get("mono_violations")),
+        "high_vs_spy30_delta": _sub(ah, bh),
+    }
+
+
+def save_simulation_result(sim):
+    """v30 simulate_corrections() の結果を simulation_result 候補として保存（dedup・固定id）。
+    保存条件を満たさなければ保存せず (False, 理由)。承認/却下 status は再保存でも保持。
+    ⚠️ 承認しても本番ニューススコアには反映しない（status 変更のみ）。"""
+    sim = sim or {}
+    if sim.get("verdict") != "改善":
+        return False, f"verdict が「改善」ではありません（{sim.get('verdict')}）"
+    if (sim.get("approved_count") or 0) <= 0:
+        return False, "承認済み補正案が0件です"
+    if (sim.get("applicable_news") or 0) < 3:
+        return False, "補正が変化を与えたニュースが3件未満です"
+    if (sim.get("eligible_n") or 0) < 10:
+        return False, "対象ニュースが10件未満です"
+
+    cand = {
+        "id": _simulation_cand_id(), "type": "simulation_result",
+        "label": "news_score_corrections", "suggestion": sim.get("verdict", ""),
+        "evidence": {}, "confidence": None,
+        "source": "news_correction_simulation",
+        "verdict": sim.get("verdict"),
+        "approved_correction_count": sim.get("approved_count"),
+        "applicable_news": sim.get("applicable_news"),
+        "eligible_n": sim.get("eligible_n"),
+        "before": sim.get("before"), "after": sim.get("after"),
+        "improvement": _improvement(sim), "reasons": sim.get("reasons", []),
+    }
+    created = _upsert(cand)
+    return True, ("保存しました（新規）" if created else "更新しました（既存candidate/承認状態は保持）")
