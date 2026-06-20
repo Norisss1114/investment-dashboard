@@ -874,3 +874,68 @@ def experiment_news_items(items, cfg=None, experiment_enabled=None):
         "avg_original": avg_original, "avg_experiment": avg_experiment, "avg_delta": avg_delta,
         "original_sentiment": original_sentiment, "experiment_sentiment": experiment_sentiment,
         "rows": rows}
+
+
+# ---------------- v39: 実験ニュース影響を個別銘柄スコアに仮反映して比較（表示のみ・本番非接続） ----------------
+def experiment_individual_score(scores, news_sum, snap, fund, plan, exp_avg_impact, market_mode="中立"):
+    """experiment avg_impact を news component に仮反映した total/verdict/action を比較（表示のみ）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    news component だけ差し替え、他コンポーネント（fund/tech/market/supply）は scores の値を流用
+    （＝「ニュース以外のスコアは同一」を構造保証）。scores/plan/action は原本非変更（コピーで計算）。
+    scoring._news_raw / action.decide_action / config 閾値を read-only 利用（編集しない）。"""
+    import config
+    from modules import scoring, action as action_mod
+
+    scores = scores or {}
+    news_sum = news_sum or {}
+    W = config.SCORE_WEIGHTS
+
+    original_total = scores.get("total", 0)
+    original_news_component = scores.get("news", 0)
+    original_verdict = scores.get("verdict")
+
+    # experiment news component（categories/reasons は元のまま、avg_impact だけ差し替え）
+    exp_news_sum = {"avg_impact": exp_avg_impact,
+                    "categories": news_sum.get("categories", {}) or {},
+                    "reasons": news_sum.get("reasons", []) or []}
+    exp_news_raw = scoring._news_raw(exp_news_sum)[0]
+    experiment_news_component = round(exp_news_raw * W["news"], 1)
+
+    experiment_total = round(original_total - original_news_component + experiment_news_component, 1)
+
+    def _verdict(total):
+        if total >= config.BUY_THRESHOLD:
+            return "BUY"
+        if total >= config.WATCH_THRESHOLD:
+            return "WATCH"
+        return "AVOID"
+
+    experiment_verdict = _verdict(experiment_total)
+
+    # action は original/experiment とも同一 market_mode で再計算（差は news のみ）。原本コピー。
+    orig_scores_copy = dict(scores)
+    exp_scores_copy = dict(scores)
+    exp_scores_copy["news"] = experiment_news_component
+    exp_scores_copy["total"] = experiment_total
+    exp_scores_copy["verdict"] = experiment_verdict
+
+    try:
+        original_action = action_mod.decide_action(orig_scores_copy, snap, fund, plan, news_sum, market_mode)["action"]
+    except Exception:
+        original_action = None
+    try:
+        experiment_action = action_mod.decide_action(exp_scores_copy, snap, fund, plan, exp_news_sum, market_mode)["action"]
+    except Exception:
+        experiment_action = None
+
+    return {
+        "original_total": original_total, "experiment_total": experiment_total,
+        "score_delta": round(experiment_total - original_total, 1),
+        "original_verdict": original_verdict, "experiment_verdict": experiment_verdict,
+        "verdict_change": (original_verdict != experiment_verdict),
+        "original_action": original_action, "experiment_action": experiment_action,
+        "action_change": (original_action != experiment_action),
+        "news_before": original_news_component, "news_after": experiment_news_component,
+        "news_delta": round(experiment_news_component - original_news_component, 1),
+        "note": "ニュース以外のスコアは同一。実験actionは market_mode=中立 前提。",
+    }

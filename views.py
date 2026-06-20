@@ -1252,10 +1252,10 @@ def render_news(rmap, watch=None, positions=None):
                 st.caption("　/　".join(meta))
 
     # 🧪 v38: 実験モードでのみ overrides を仮適用（この銘柄のニュースだけ・本番非反映）
-    _render_news_experiment(sel, news)
+    _render_news_experiment(sel, news, r)
 
 
-def _render_news_experiment(ticker, news):
+def _render_news_experiment(ticker, news, r=None):
     """v38: 個別銘柄のライブニュースに実験モードで overrides を仮適用（表示のみ・本番非接続）。
     通常の news_sum / avg_impact / verdict / score は変更しない。"""
     st.divider()
@@ -1304,6 +1304,39 @@ def _render_news_experiment(ticker, news):
     } for r in e["rows"]]), width='stretch', hide_index=True)
 
     st.info("これは個別銘柄ニュース分析の実験表示のみです。発掘スコア・ランキングには反映していません。")
+
+    # 🧪 v39: 実験ニュース影響を個別銘柄スコアに仮反映して比較（表示のみ・本番非接続）
+    _render_news_experiment_score(e, r)
+
+
+def _render_news_experiment_score(exp, r):
+    """v39: experiment avg_impact を news component に仮反映した total/verdict/action 比較（表示のみ）。"""
+    st.divider()
+    st.subheader("🧪 実験ニュース反映スコア比較")
+    if not exp.get("experiment_applied") or exp.get("total", 0) == 0 or r is None:
+        if not exp.get("experiment_applied"):
+            st.info("overrides未適用のため未計算（実験モードONかつ overrides enabled=true が必要です）。")
+        else:
+            st.info("対象ニュースが無いため未計算です。")
+        return
+
+    s = nadopt_mod.experiment_individual_score(
+        r.get("scores", {}), r.get("news_sum", {}), r.get("snap", {}),
+        r.get("fund", {}), r.get("plan", {}), exp.get("avg_experiment"), market_mode="中立")
+
+    m = st.columns(3)
+    m[0].metric("total score", f'{s["experiment_total"]:.1f}', f'{s["score_delta"]:+.1f}（元 {s["original_total"]:.1f}）')
+    m[1].metric("verdict", s["experiment_verdict"],
+                (f'← {s["original_verdict"]}' if s["verdict_change"] else "変化なし"), delta_color="off")
+    m[2].metric("action", s["experiment_action"] or "—",
+                (f'← {s["original_action"]}' if s["action_change"] else "変化なし"), delta_color="off")
+
+    st.markdown(
+        f'- news component：**{s["news_before"]:.1f} → {s["news_after"]:.1f}**（delta {s["news_delta"]:+.1f}）\n'
+        f'- verdict change：**{s["verdict_change"]}**（{s["original_verdict"]} → {s["experiment_verdict"]}）\n'
+        f'- action change：**{s["action_change"]}**（{s["original_action"]} → {s["experiment_action"]}）')
+    st.caption("ℹ️ " + s["note"] + "（fundamental / technical / market / supply_demand は同一）")
+    st.info("これはスコア仮反映の表示のみです。本番スコア・発掘スコア・ランキングには反映していません。")
 
 
 # ============================================================ 売買プラン
