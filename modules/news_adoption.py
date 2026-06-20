@@ -22,6 +22,9 @@ PATH = "user_data/news_adoption_candidates.json"
 OVERRIDES_PATH = "user_data/news_score_overrides.json"  # v33: 設定ファイル（生成のみ・本番未読込）
 MIN_SAMPLE = 3  # n>=3 のみ候補化（low_sample は保存しない）
 NEWS_OVERRIDES_EXPERIMENT = False  # v37: 実験モードフラグ（デフォルト false=絶対未適用）
+PRODUCTION_NEWS_OVERRIDES_ENABLED = False  # v42: 本番反映グローバルスイッチ（OFF固定・コード鍵）
+PRODUCTION_FLAGS_PATH = "user_data/news_production_flags.json"  # v42: 運用確認フラグ（自動生成しない）
+PRODUCTION_OVERRIDES_FRESH_HOURS = 72  # v42: overrides.generated_at の鮮度しきい値
 
 
 # ---------------- 保存・読込（壊れても落ちない） ----------------
@@ -1138,3 +1141,94 @@ def save_production_apply_candidate(exp_result):
     }
     created = _upsert(cand)
     return True, ("保存しました（新規）" if created else "更新しました（既存candidate/承認状態は保持）")
+
+
+# ---------------- v42: 本番反映スイッチの状態評価（判定のみ・apply関数は無し・本番非接続） ----------------
+def _production_apply_confirmed():
+    """news_production_flags.json の production_apply_confirmed を読む。
+    ファイル無し / 壊れJSON / キー無し は False（default-deny）。自動生成しない。"""
+    flags = storage.load_json(PRODUCTION_FLAGS_PATH, None)
+    if not isinstance(flags, dict):
+        return False
+    return flags.get("production_apply_confirmed") is True
+
+
+def _overrides_freshness_ok(cfg):
+    """overrides.generated_at が PRODUCTION_OVERRIDES_FRESH_HOURS 以内なら True。
+    無し / parse不可 / 古い は False。"""
+    if not isinstance(cfg, dict):
+        return False
+    ga = cfg.get("generated_at")
+    if not ga:
+        return False
+    try:
+        ts = dt.datetime.fromisoformat(ga)
+    except (ValueError, TypeError):
+        return False
+    age_h = (dt.datetime.now() - ts).total_seconds() / 3600.0
+    return 0 <= age_h <= PRODUCTION_OVERRIDES_FRESH_HOURS
+
+
+def get_production_overrides_status():
+    """本番反映の全ゲートを評価して allow/gates/reasons/summary を返す（判定のみ・副作用なし）。
+    ⚠️ apply パスは存在しない（v42）。本番ニューススコア・発掘スコア・ランキングには一切反映しない。
+    PRODUCTION_NEWS_OVERRIDES_ENABLED が False の限り allow は必ず False。
+    consistency(fingerprint) は v42 では未実装＝必ず NG なので allow は決して True にならない。"""
+    cands = load()
+    cfg = load_overrides_config()
+
+    g_switch = (PRODUCTION_NEWS_OVERRIDES_ENABLED is True)
+    g_confirm = _production_apply_confirmed()
+    g_exists = isinstance(cfg, dict)
+    g_enabled = bool(cfg.get("enabled")) if g_exists else False
+    guard_decision = production_guard(cands)["decision"]
+    g_guard = (guard_decision == "反映準備OK")
+    g_approved = any(c.get("type") == "production_apply_candidate" and c.get("status") == "approved"
+                     for c in cands)
+    g_fresh = _overrides_freshness_ok(cfg) if g_exists else False
+    g_consistency = False  # v42: fingerprint 未実装のため必ず NG
+
+    gates = [
+        {"label": "Global production switch", "ok": g_switch, "value": PRODUCTION_NEWS_OVERRIDES_ENABLED},
+        {"label": "Operational confirmation", "ok": g_confirm, "value": g_confirm},
+        {"label": "Overrides exists", "ok": g_exists, "value": g_exists},
+        {"label": "Overrides enabled", "ok": g_enabled, "value": g_enabled},
+        {"label": "Production guard ready", "ok": g_guard, "value": guard_decision},
+        {"label": "Approved production_apply_candidate", "ok": g_approved, "value": g_approved},
+        {"label": "Overrides freshness (<=72h)", "ok": g_fresh,
+         "value": (cfg or {}).get("generated_at") if g_exists else None},
+        {"label": "Fingerprint consistency", "ok": g_consistency, "value": "未実装"},
+    ]
+
+    reasons = []
+    if not g_switch:
+        reasons.append("PRODUCTION_NEWS_OVERRIDES_ENABLED is False")
+    if not g_confirm:
+        reasons.append("production_apply_confirmed is False")
+    if not g_exists:
+        reasons.append("overrides file missing")
+    if g_exists and not g_enabled:
+        reasons.append("overrides enabled is False")
+    if not g_guard:
+        reasons.append("production guard is not ready")
+    if not g_approved:
+        reasons.append("approved production_apply_candidate missing")
+    if not g_fresh:
+        reasons.append("overrides generated_at is stale")
+    if not g_consistency:
+        reasons.append("fingerprint consistency check is not implemented yet")
+
+    allow = all(g["ok"] for g in gates)  # consistency が必ず False のため v42 では常に False
+
+    summary = {
+        "production_switch": PRODUCTION_NEWS_OVERRIDES_ENABLED,
+        "production_apply_confirmed": g_confirm,
+        "overrides_exists": g_exists,
+        "overrides_enabled": g_enabled,
+        "guard_decision": guard_decision,
+        "approved_candidate_exists": g_approved,
+        "freshness_ok": g_fresh,
+        "consistency_ok": g_consistency,
+        "allow": allow,
+    }
+    return {"allow": allow, "gates": gates, "reasons": reasons, "summary": summary}

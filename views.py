@@ -590,6 +590,9 @@ def _render_news_calibration_analytics():
         # 📌 v27.2: 検証候補として保存（本番非反映）
         _render_news_adoption()
 
+        # 🔐 v42: 本番反映ステータス（候補有無に依らず常に表示・apply 関数なし・本番非接続）
+        _render_production_overrides_status()
+
 
 def _render_news_score_corrections():
     """v28: ニューススコア補正案ジェネレーター（表示のみ・本番スコア非反映）。"""
@@ -1142,6 +1145,30 @@ def _render_news_adoption():
             st.markdown("---")
         st.caption("※承認/却下は status を変えるだけの控えです。"
                    "**ニューススコア・発掘スコア・ランキングには一切反映しません。**")
+
+
+def _render_production_overrides_status():
+    """v42: 本番反映の全ゲートの状態を表示（判定のみ・apply 関数なし・本番非反映）。"""
+    st.divider()
+    st.subheader("🔐 本番反映ステータス")
+    s = nadopt_mod.get_production_overrides_status()
+
+    allow = s["allow"]
+    color = "#16a34a" if allow else "#dc2626"
+    st.markdown(f'allow：<b style="color:{color};font-size:1.05rem;">{allow}</b>', unsafe_allow_html=True)
+
+    st.markdown("**ゲート判定**")
+    for g in s["gates"]:
+        mark = "✅" if g["ok"] else "❌"
+        st.markdown(f'{mark} {g["label"]}：{g["value"]}')
+
+    if s["reasons"]:
+        st.markdown("**ブロック理由**")
+        for r in s["reasons"]:
+            st.caption("・" + r)
+
+    st.info("v42では本番適用関数は存在しません。これは状態表示のみです。"
+            "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
 
 # ============================================================ 個別銘柄分析
