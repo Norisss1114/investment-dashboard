@@ -1241,6 +1241,70 @@ def _render_production_on_readiness():
     st.info("v47では本番スイッチはOFFのままです。これはON前の準備確認のみです。"
             "**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
+    # 📋 v49: ON前 実データ運用チェックリスト（read-only 集計・switch 不変）
+    _render_production_data_checklist()
+
+
+def _render_production_data_checklist():
+    """v49: 本番ONまでに必要な運用データの準備状況を集計表示（read-only・switch 不変）。"""
+    st.divider()
+    st.subheader("📋 ON前 実データ運用チェックリスト")
+    d = nadopt_mod.production_data_checklist()
+    ready = d["operation_ready"]
+    color = "#16a34a" if ready else "#dc2626"
+    st.markdown(f'operation_ready：<b style="color:{color};font-size:1.05rem;">{ready}</b>'
+                f'　（ret_30 最低必要件数 {d["min_ret30_required"]}）', unsafe_allow_html=True)
+
+    def _tbl(title, rows):
+        st.markdown(f"**{title}**")
+        st.dataframe(pd.DataFrame([{"項目": k, "値": ("—" if v is None else v)} for k, v in rows],
+                                  ), width='stretch', hide_index=True)
+
+    c = d["calibration"]
+    _tbl("較正データ", [
+        ("exists", c["exists"]), ("saved", c["saved"]), ("updated", c["updated"]),
+        ("ret7_count", c["ret7_count"]), ("ret30_count", c["ret30_count"]),
+        ("ret30_missing", c["ret30_missing"]), ("pending", c["pending"]), ("unavailable", c["unavailable"])])
+
+    cd = d["candidates"]
+    _tbl("補正候補", [
+        ("exists", cd["exists"]), ("score_correction", cd["score_correction"]),
+        ("approved_score_correction", cd["approved_score_correction"]),
+        ("simulation_result", cd["simulation_result"]),
+        ("approved_simulation_result", cd["approved_simulation_result"]),
+        ("production_apply_candidate", cd["production_apply_candidate"]),
+        ("approved_production_apply_candidate", cd["approved_production_apply_candidate"])])
+
+    o = d["overrides"]
+    def _short(fp):
+        return (fp[:12] if isinstance(fp, str) and fp else "—")
+    _tbl("overrides", [
+        ("exists", o["exists"]), ("enabled", o["enabled"]), ("generated_at", o["generated_at"]),
+        ("freshness_ok", o["freshness_ok"]), ("impact_count", o["impact_count"]),
+        ("category_count", o["category_count"]), ("sentiment_count", o["sentiment_count"]),
+        ("current_fingerprint", _short(o["current_fingerprint"])),
+        ("candidate_fingerprint", _short(o["candidate_fingerprint"])),
+        ("fingerprint_match", o["fingerprint_match"])])
+
+    fl = d["flags"]
+    _tbl("production flags", [
+        ("exists", fl["exists"]), ("production_apply_confirmed", fl["production_apply_confirmed"])])
+
+    rd = d["readiness"]
+    _tbl("readiness", [
+        ("ready_for_switch_on", rd["ready_for_switch_on"]), ("allow", rd["allow"])])
+    if rd["blocking_reasons"]:
+        for r in rd["blocking_reasons"]:
+            st.caption("・" + r)
+
+    if d["next_steps"]:
+        st.markdown("**次にやるべき作業**")
+        for ns in d["next_steps"]:
+            st.markdown(f"- {ns}")
+
+    st.info("これは運用データの準備状況チェックです。**本番スイッチは変更しません。"
+            "本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
+
 
 # ============================================================ 個別銘柄分析
 def render_stock(rmap, watch=None, positions=None):

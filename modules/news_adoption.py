@@ -28,6 +28,7 @@ NEWS_OVERRIDES_EXPERIMENT = False  # v37: 実験モードフラグ（デフォ�
 PRODUCTION_NEWS_OVERRIDES_ENABLED = False  # v42: 本番反映グローバルスイッチ（OFF固定・コード鍵）
 PRODUCTION_FLAGS_PATH = "user_data/news_production_flags.json"  # v42: 運用確認フラグ（自動生成しない）
 PRODUCTION_OVERRIDES_FRESH_HOURS = 72  # v42: overrides.generated_at の鮮度しきい値
+MIN_RET30_FOR_PRODUCTION = 30  # v49: 本番運用に必要な ret_30 計算済み較正ニュースの最低件数
 
 
 # ---------------- 保存・読込（壊れても落ちない） ----------------
@@ -1443,3 +1444,128 @@ def production_on_readiness_check():
 
     return {"ready_for_switch_on": ready_for_switch_on, "items": items,
             "blocking_reasons": blocking_reasons, "next_action": next_action}
+
+
+# ---------------- v49: ON前 実データ運用チェックリスト（read-only 集計・switch 不変・本番非接続） ----------------
+def production_data_checklist():
+    """本番ONまでに必要な「運用データ」が揃っているかを集計（read-only・表示のみ）。
+    ⚠️ PRODUCTION_NEWS_OVERRIDES_ENABLED は変更しない。本番スコア・発掘ランキングには一切反映しない。
+    operation_ready は10条件 AND（運用データが揃ったかの指標。switch OFF のため本番適用は起きない）。"""
+    # --- 較正データ ---
+    cal_recs = ncal.load()
+    if not isinstance(cal_recs, list):
+        cal_recs = []
+    a = ncal.analytics(cal_recs)
+    ov_a = a.get("overall", {})
+    ret30_count = ov_a.get("ret30_count", 0) or 0
+    pending = sum(1 for r in cal_recs if r.get("status") == "pending")
+    unavailable = sum(1 for r in cal_recs if r.get("status") == "unavailable")
+    calibration = {
+        "exists": bool(cal_recs),
+        "saved": ov_a.get("saved", 0) or 0,
+        "updated": ov_a.get("updated", 0) or 0,
+        "ret7_count": ov_a.get("ret7_count", 0) or 0,
+        "ret30_count": ret30_count,
+        "ret30_missing": max(0, MIN_RET30_FOR_PRODUCTION - ret30_count),
+        "pending": pending,
+        "unavailable": unavailable,
+    }
+
+    # --- 補正候補 ---
+    cands = load()
+    def _cnt(t, approved=False):
+        return sum(1 for c in cands if c.get("type") == t and (c.get("status") == "approved" if approved else True))
+    candidates = {
+        "exists": bool(cands),
+        "score_correction": _cnt("score_correction"),
+        "approved_score_correction": _cnt("score_correction", True),
+        "simulation_result": _cnt("simulation_result"),
+        "approved_simulation_result": _cnt("simulation_result", True),
+        "production_apply_candidate": _cnt("production_apply_candidate"),
+        "approved_production_apply_candidate": _cnt("production_apply_candidate", True),
+    }
+
+    # --- overrides ---
+    cfg = load_overrides_config()
+    ov_exists = isinstance(cfg, dict)
+    status = get_production_overrides_status()
+    summ = status.get("summary", {}) or {}
+    overrides = {
+        "exists": ov_exists,
+        "enabled": bool(cfg.get("enabled")) if ov_exists else False,
+        "generated_at": (cfg or {}).get("generated_at") if ov_exists else None,
+        "freshness_ok": summ.get("freshness_ok", False),
+        "impact_count": len((cfg or {}).get("impact_overrides") or {}) if ov_exists else 0,
+        "category_count": len((cfg or {}).get("category_adjustments") or {}) if ov_exists else 0,
+        "sentiment_count": len((cfg or {}).get("sentiment_notes") or {}) if ov_exists else 0,
+        "current_fingerprint": summ.get("current_fingerprint"),
+        "candidate_fingerprint": summ.get("candidate_fingerprint"),
+        "fingerprint_match": summ.get("fingerprint_match", False),
+    }
+
+    # --- flags ---
+    flags = {
+        "exists": os.path.exists(PRODUCTION_FLAGS_PATH),
+        "production_apply_confirmed": _production_apply_confirmed(),
+    }
+
+    # --- readiness ---
+    rc = production_on_readiness_check()
+    readiness = {
+        "ready_for_switch_on": rc["ready_for_switch_on"],
+        "allow": status.get("allow", False),
+        "blocking_reasons": rc["blocking_reasons"],
+    }
+
+    # --- operation_ready（10条件 AND） ---
+    operation_ready = (
+        ret30_count >= MIN_RET30_FOR_PRODUCTION
+        and candidates["approved_score_correction"] >= 1
+        and candidates["approved_simulation_result"] >= 1
+        and overrides["exists"]
+        and overrides["enabled"] is True
+        and candidates["approved_production_apply_candidate"] >= 1
+        and flags["production_apply_confirmed"] is True
+        and overrides["fingerprint_match"] is True
+        and overrides["freshness_ok"] is True
+        and readiness["ready_for_switch_on"] is True
+    )
+
+    # --- next_steps（未達項目をパイプライン順に全部列挙） ---
+    next_steps = []
+    if ret30_count == 0 and calibration["saved"] == 0:
+        next_steps.append("まずニュース較正データを保存してください。")
+    if ret30_count < MIN_RET30_FOR_PRODUCTION:
+        next_steps.append(f"ret_30 が {calibration['ret30_missing']}件 不足しています。"
+                          "30営業日経過後に『較正リターンを更新』してください。")
+    if candidates["approved_score_correction"] < 1:
+        next_steps.append("補正案（score_correction）を保存・承認してください。")
+    if candidates["approved_simulation_result"] < 1:
+        next_steps.append("シミュレーション結果（simulation_result）を保存・承認してください。")
+    if not overrides["exists"]:
+        next_steps.append("overrides（news_score_overrides.json）を生成してください。")
+    elif overrides["enabled"] is not True:
+        next_steps.append("overrides の enabled=true が必要です（本番運用判断）。")
+    if candidates["approved_production_apply_candidate"] < 1:
+        next_steps.append("production_apply_candidate を保存・承認してください。")
+    if overrides["exists"] and overrides["fingerprint_match"] is not True:
+        next_steps.append("overrides 変更後は候補を再保存・再承認して fingerprint を一致させてください。")
+    if overrides["exists"] and overrides["freshness_ok"] is not True:
+        next_steps.append("overrides を再生成してください（generated_at が72時間超）。")
+    if flags["production_apply_confirmed"] is not True:
+        next_steps.append("news_production_flags.json を作成し production_apply_confirmed=true にしてください。")
+    if readiness["ready_for_switch_on"] is not True:
+        next_steps.append("readiness が true になるまでスイッチONしないでください。")
+    if operation_ready:
+        next_steps = ["運用データは揃いました。本番ONは別PRで慎重に判断してください。"]
+
+    return {
+        "operation_ready": operation_ready,
+        "min_ret30_required": MIN_RET30_FOR_PRODUCTION,
+        "calibration": calibration,
+        "candidates": candidates,
+        "overrides": overrides,
+        "flags": flags,
+        "readiness": readiness,
+        "next_steps": next_steps,
+    }
