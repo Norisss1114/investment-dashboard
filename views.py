@@ -1332,6 +1332,7 @@ def _render_production_data_creation_plan():
     #    safe_to_run=True のときだけ表示。本番スコア・ランキング・overrides・flags・switch には触れない。
     steps = {s["id"]: s for s in plan["steps"]}
     s1, s2 = steps.get("save_calibration", {}), steps.get("update_returns", {})
+    s3, s4 = steps.get("approve_score_correction", {}), steps.get("approve_simulation_result", {})
 
     if s1.get("safe_to_run"):
         st.markdown("**Step1: ニュース較正データを保存**")
@@ -1358,9 +1359,63 @@ def _render_production_data_creation_plan():
             st.success(f"{n} 件のリターンを更新しました（mock/失敗は unavailable）。")
             st.rerun()
 
-    st.info("v51-A では Step1/Step2（較正データ保存・リターン更新）のみ実行できます。"
-            "**較正データJSONのみ更新し、本番スコア・発掘ランキング・overrides・flags・スイッチには一切触れません。**"
-            "Step3以降は既存UIまたは手動で実行してください。")
+    # 🟢 v51-B: Step3（score_correction）は案B＝保存ボタンのみ。承認はフロー内で一括せず既存UIへ案内。
+    #    score_correction は複数件になり得るため、自動承認・一括承認は行わない。
+    if s3.get("safe_to_run"):
+        st.markdown("**Step3: 補正案(score_correction)を保存**")
+        _all = nadopt_mod.list_all()
+        _sc = [c for c in _all if c.get("type") == "score_correction"]
+        _sc_appr = sum(1 for c in _sc if c.get("status") == "approved")
+        _sc_pending = sum(1 for c in _sc if c.get("status") not in ("approved", "rejected"))
+        st.caption(f"現在 score_correction：保存 {len(_sc)}件 / 承認済 {_sc_appr}件 / 未承認 {_sc_pending}件")
+        if st.button("📌 Step3: 補正案を保存", key="calib_flow_sc_save", width='stretch'):
+            total, created, updated = nadopt_mod.save_score_corrections()
+            if total == 0:
+                st.info("保存できる補正案（n≥5・delta≠0・示唆あり）がありませんでした。")
+            else:
+                st.success(f"補正案 {total} 件を保存しました（新規 {created} / 更新 {updated}）。"
+                           "※本番スコアには反映しません。")
+                st.rerun()
+        st.caption("承認は上の「📋 ニュース採用候補」で各 score_correction を**個別に**「✅ 承認」してください"
+                   "（このフローでは一括承認しません）。")
+
+    # 🟢 v51-B: Step4（simulation_result）は案A＝保存ボタンと承認ボタンを分離（ワンクリック化はしない）。
+    #    simulation_result は固定1件のため、明示の承認ボタンを置ける。simulate_corrections は read-only。
+    if s4.get("safe_to_run"):
+        st.markdown("**Step4: シミュレーション結果(simulation_result)を保存・承認**")
+        _all = nadopt_mod.list_all()
+        _appr_sc = [c for c in _all if c.get("type") == "score_correction" and c.get("status") == "approved"]
+        sim = ncal_mod.simulate_corrections(candidates=_appr_sc)
+        _vc = _SIM_VERDICT_COLOR.get(sim["verdict"], "#64748b")
+        st.markdown(f'判定：<b style="color:{_vc};">{sim["verdict"]}</b>'
+                    f'（承認済補正 {sim["approved_count"]} / 適用 {sim["applicable_news"]} / eligible {sim["eligible_n"]}）',
+                    unsafe_allow_html=True)
+
+        _can_save = (sim["verdict"] == "改善" and sim["approved_count"] > 0
+                     and sim["applicable_news"] >= 3 and sim["eligible_n"] >= 10)
+        if _can_save:
+            if st.button("📌 Step4a: シミュレーション結果を保存", key="calib_flow_sim_save", width='stretch'):
+                ok, msg = nadopt_mod.save_simulation_result(sim)
+                (st.success if ok else st.warning)(msg + "（※本番スコアには反映しません）")
+                if ok:
+                    st.rerun()
+        else:
+            st.caption("保存条件（判定=改善・承認済補正≥1・適用≥3・eligible≥10）を満たすと保存ボタンが表示されます。")
+
+        _sim_cand = next((c for c in _all if c.get("type") == "simulation_result"), None)
+        if _sim_cand is None:
+            st.caption("承認するには、先に上の「📌 Step4a」で simulation_result を保存してください。")
+        elif _sim_cand.get("status") == "approved":
+            st.caption("✅ simulation_result は承認済みです。")
+        else:
+            if st.button("✅ Step4b: シミュレーション結果を承認", key="calib_flow_sim_approve", width='stretch'):
+                nadopt_mod.approve(_sim_cand["id"])
+                st.success("simulation_result を承認しました（status 変更のみ・本番スコアには反映しません）。")
+                st.rerun()
+
+    st.info("v51-B では Step1〜Step4（較正データ保存・リターン更新・補正案保存・シミュレーション保存/承認）まで実行できます。"
+            "**candidates / 較正データJSONのみ更新し、本番スコア・発掘ランキング・overrides・flags・スイッチには一切触れません。**"
+            "score_correction の承認は「📋 ニュース採用候補」で個別に、Step5以降は既存UIまたは手動で実行してください。")
 
 
 # ============================================================ 個別銘柄分析
