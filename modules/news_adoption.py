@@ -14,6 +14,7 @@ v27.1 の news_calibration.analytics()/recommendation() が出す
 候補抽出は recommendation()/analytics() の構造化データから組み立てる（文字列パースしない）。
 """
 import datetime as dt
+import os
 
 from modules import storage, news_calibration as ncal
 
@@ -542,3 +543,56 @@ def load_overrides_config():
     """生成済み overrides を読む（表示用）。無ければ None。"""
     cfg = storage.load_json(OVERRIDES_PATH, None)
     return cfg if isinstance(cfg, dict) else None
+
+
+# ---------------- v34: overrides 設定ファイルの安全プレビュー（読み取り表示のみ・本番非反映） ----------------
+def preview_overrides_config():
+    """news_score_overrides.json を読み、プレビュー用に正規化（読み取りのみ・非改変）。
+    ⚠️ ファイルは書き換えない（enabled=true でも false に直さない）。
+    ⚠️ news.py には読み込ませない・本番ニューススコアには反映しない。
+    status: 未生成（ファイル無）/ 読み込み不可（dictで読めない）/ 正常。"""
+    exists = os.path.exists(OVERRIDES_PATH)
+    cfg = load_overrides_config() if exists else None
+
+    if not exists:
+        return {"status": "未生成", "exists": False, "enabled": None, "safe": False,
+                "safety_label": "未生成", "generated_at": None, "source": None,
+                "guard_decision": None, "impact_rows": [], "category_rows": [],
+                "sentiment_rows": [], "counts": {"impact": 0, "category": 0, "sentiment": 0},
+                "simulation_summary": None}
+    if not isinstance(cfg, dict):
+        return {"status": "読み込み不可", "exists": True, "enabled": None, "safe": False,
+                "safety_label": "読み込み不可", "generated_at": None, "source": None,
+                "guard_decision": None, "impact_rows": [], "category_rows": [],
+                "sentiment_rows": [], "counts": {"impact": 0, "category": 0, "sentiment": 0},
+                "simulation_summary": None}
+
+    enabled = bool(cfg.get("enabled"))
+    safe = not enabled
+    safety_label = "未適用・安全" if not enabled else "注意：enabled=true"
+
+    # impact_overrides: {"5": 3} -> {from:5, to:3, delta:-2}。key が int化できなくても落ちない。
+    impact_rows = []
+    for k, v in (cfg.get("impact_overrides") or {}).items():
+        try:
+            frm = int(k)
+        except (TypeError, ValueError):
+            frm = k  # 変換不可はそのまま表示（落とさない）
+        to = v
+        delta = (to - frm if isinstance(frm, int) and isinstance(to, int) else None)
+        impact_rows.append({"from": frm, "to": to, "delta": delta})
+
+    category_rows = [{"category": k, "adjustment": v}
+                     for k, v in (cfg.get("category_adjustments") or {}).items()]
+    sentiment_rows = [{"sentiment": k, "note": v}
+                      for k, v in (cfg.get("sentiment_notes") or {}).items()]
+
+    return {
+        "status": "正常", "exists": True, "enabled": enabled, "safe": safe,
+        "safety_label": safety_label,
+        "generated_at": cfg.get("generated_at"), "source": cfg.get("source"),
+        "guard_decision": cfg.get("guard_decision"),
+        "impact_rows": impact_rows, "category_rows": category_rows, "sentiment_rows": sentiment_rows,
+        "counts": {"impact": len(impact_rows), "category": len(category_rows), "sentiment": len(sentiment_rows)},
+        "simulation_summary": cfg.get("simulation_summary"),
+    }

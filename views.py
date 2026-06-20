@@ -816,6 +816,77 @@ def _render_overrides_generator():
     st.info("これは設定ファイルの生成のみで、news.py には読み込ませていません。"
             "**本番ニューススコア・発掘スコア・ランキングには一切反映していません（enabled=false）。**")
 
+    # 🧾 v34: 生成済み overrides の安全プレビュー（読み取り表示のみ・本番非反映）
+    _render_overrides_preview()
+
+
+def _render_overrides_preview():
+    """v34: news_score_overrides.json の安全プレビュー（読み取り表示のみ・ファイル非改変・本番非反映）。"""
+    st.divider()
+    st.subheader("🧾 ニューススコア設定プレビュー")
+    p = nadopt_mod.preview_overrides_config()
+
+    if p["status"] == "未生成":
+        st.info("まだ news_score_overrides.json は生成されていません。")
+        return
+    if p["status"] == "読み込み不可":
+        st.error("news_score_overrides.json を読み込めません（壊れている可能性があります）。")
+        return
+
+    # 基本情報
+    st.markdown(f'- ファイル：**あり**（`{nadopt_mod.OVERRIDES_PATH}`）')
+    st.markdown(f'- generated_at：{p["generated_at"] or "—"}')
+    st.markdown(f'- enabled：**{str(p["enabled"]).lower()}**')
+    st.markdown(f'- source：{p["source"] or "—"}')
+    st.markdown(f'- guard_decision：{p["guard_decision"] or "—"}')
+
+    # 安全ステータス
+    if p["safe"]:
+        st.success("✅ 未適用・安全。本番には反映されていません。")
+    else:
+        st.warning("⚠️ 注意：enabled=true です。ただし現時点で news.py は読んでいないため、まだ実反映はありません。")
+
+    def _f(v):
+        return (f"{v:+.3f}" if isinstance(v, float) else (f"{v:+d}" if isinstance(v, int) and not isinstance(v, bool) else "—"))
+
+    # impact_overrides
+    st.markdown(f'**impact_overrides（{p["counts"]["impact"]}件）**')
+    if p["impact_rows"]:
+        rows = [{"元score": r["from"], "新score": r["to"],
+                 "delta": (f'{r["delta"]:+d}' if isinstance(r["delta"], int) else "—")} for r in p["impact_rows"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("なし")
+
+    # category_adjustments
+    st.markdown(f'**category_adjustments（{p["counts"]["category"]}件）**')
+    if p["category_rows"]:
+        rows = [{"category": r["category"],
+                 "adjustment": (f'{r["adjustment"]:+d}' if isinstance(r["adjustment"], int) else r["adjustment"])}
+                for r in p["category_rows"]]
+        st.dataframe(pd.DataFrame(rows), width='stretch', hide_index=True)
+    else:
+        st.caption("なし")
+
+    # sentiment_notes
+    st.markdown(f'**sentiment_notes（{p["counts"]["sentiment"]}件）**')
+    if p["sentiment_rows"]:
+        st.dataframe(pd.DataFrame([{"sentiment": r["sentiment"], "note": r["note"]} for r in p["sentiment_rows"]]),
+                     width='stretch', hide_index=True)
+    else:
+        st.caption("なし")
+
+    # simulation_summary
+    ss = p["simulation_summary"] or {}
+    st.markdown("**simulation_summary**")
+    st.caption(
+        f'eligible_n {ss.get("eligible_n","—")} / applicable_news {ss.get("applicable_news","—")} / '
+        f'approved_correction_count {ss.get("approved_correction_count","—")} ｜ '
+        f'corr_ret30Δ {_f(ss.get("corr_ret30_delta"))} / mono違反Δ {_f(ss.get("mono_violations_delta"))} / '
+        f'high vsSPY30Δ {_f(ss.get("high_vs_spy30_delta"))}')
+
+    st.info("この画面はプレビューのみです。本番ニューススコアには反映していません。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
