@@ -613,3 +613,102 @@ def preview_overrides_config():
         "counts": {"impact": len(impact_rows), "category": len(category_rows), "sentiment": len(sentiment_rows)},
         "simulation_summary": cfg.get("simulation_summary"),
     }
+
+
+# ---------------- v36: overrides を仮適用した差分プレビュー（表示計算のみ・JSON非改変・本番非反映） ----------------
+def _clamp5(v):
+    return max(-5, min(5, int(round(v))))
+
+
+def _apply_overrides_to_score(impact_score, categories, impact_map, category_deltas):
+    """1ニュースへ overrides を仮適用（本番非反映）。
+    返り値 (after, impact_applied, category_applied)。
+    impact置換 → category加算 → clamp(-5..+5)。news_calibration の private には依存しない。"""
+    s = impact_score
+    impact_applied = str(impact_score) in impact_map
+    if impact_applied:
+        s = impact_map[str(impact_score)]
+    category_applied = False
+    for c in (categories or []):
+        if c in category_deltas:
+            s += category_deltas[c]
+            category_applied = True
+    return _clamp5(s), impact_applied, category_applied
+
+
+def _avg1(vals):
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 2) if vals else None
+
+
+def preview_apply_overrides(records=None, cfg=None):
+    """較正ニュースへ overrides を仮適用した差分プレビュー（表示計算のみ・JSON非改変）。
+    ⚠️ 本番ニューススコア・発掘スコア・ランキングには一切反映しない（enabled に依らず計算のみ）。
+    records: None なら news_calibration.load()。cfg: None なら load_overrides_config()。"""
+    cfg = cfg if cfg is not None else load_overrides_config()
+    if not isinstance(cfg, dict):
+        return {"available": False, "enabled": None,
+                "reason": "overrides 設定ファイルがありません（先に生成してください）",
+                "total": 0, "changed": 0, "avg_before": None, "avg_after": None, "avg_delta": None,
+                "rows": [], "by_ticker": []}
+
+    enabled = bool(cfg.get("enabled"))
+    # overrides を仮適用用に正規化（impact キーは str のまま比較、category は label->delta）
+    impact_map = {}
+    for k, v in (cfg.get("impact_overrides") or {}).items():
+        if isinstance(v, int):
+            impact_map[str(k)] = v
+    category_deltas = {}
+    for k, v in (cfg.get("category_adjustments") or {}).items():
+        if isinstance(v, int) and k:
+            category_deltas[k] = v
+    sentiment_notes = cfg.get("sentiment_notes") or {}
+
+    recs = records if records is not None else ncal.load()
+    if not isinstance(recs, list):
+        recs = []
+    # impact_score を持つニュースのみ対象
+    targets = [r for r in recs if isinstance(r.get("impact_score"), int)]
+    if not targets:
+        return {"available": True, "enabled": enabled,
+                "reason": "impact_score を持つ較正ニュースがありません",
+                "total": 0, "changed": 0, "avg_before": None, "avg_after": None, "avg_delta": None,
+                "rows": [], "by_ticker": []}
+
+    rows = []
+    for r in targets:
+        before = r["impact_score"]
+        cats = r.get("categories") or []
+        after, imp_app, cat_app = _apply_overrides_to_score(before, cats, impact_map, category_deltas)
+        sent = r.get("sentiment")
+        note = sentiment_notes.get(sent) if sent in sentiment_notes else None
+        rows.append({
+            "ticker": r.get("ticker"), "news_date": r.get("news_date"),
+            "headline": r.get("headline", ""), "sentiment": sent, "categories": cats,
+            "impact_before": before, "impact_after": after, "delta": after - before,
+            "impact_override_applied": imp_app, "category_adjustment_applied": cat_app,
+            "sentiment_note": note})
+
+    changed = sum(1 for r in rows if r["delta"] != 0)
+    avg_before = _avg1([r["impact_before"] for r in rows])
+    avg_after = _avg1([r["impact_after"] for r in rows])
+    avg_delta = _avg1([r["delta"] for r in rows])
+
+    # 銘柄別 summary
+    by = {}
+    for r in rows:
+        by.setdefault(r["ticker"], []).append(r)
+    by_ticker = []
+    for t, lst in by.items():
+        by_ticker.append({
+            "ticker": t, "news_count": len(lst),
+            "changed_count": sum(1 for x in lst if x["delta"] != 0),
+            "avg_before": _avg1([x["impact_before"] for x in lst]),
+            "avg_after": _avg1([x["impact_after"] for x in lst]),
+            "avg_delta": _avg1([x["delta"] for x in lst])})
+    by_ticker.sort(key=lambda x: -x["changed_count"])
+
+    return {"available": True, "enabled": enabled, "reason": "",
+            "total": len(rows), "changed": changed,
+            "avg_before": avg_before, "avg_after": avg_after, "avg_delta": avg_delta,
+            "rows": rows, "by_ticker": by_ticker}

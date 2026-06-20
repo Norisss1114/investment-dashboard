@@ -918,6 +918,63 @@ def _render_overrides_status():
 
     st.info("v35 は overrides を読み込むだけです。**本番ニューススコア・発掘スコア・ランキングには一切反映していません。**")
 
+    # 🧪 v36: overrides 仮適用の差分プレビュー（表示計算のみ・本番非反映）
+    _render_overrides_apply_preview()
+
+
+def _render_overrides_apply_preview():
+    """v36: overrides を較正ニュースへ仮適用した差分プレビュー（表示のみ・JSON非改変・本番非反映）。"""
+    st.divider()
+    st.subheader("🧪 overrides適用差分プレビュー")
+    p = nadopt_mod.preview_apply_overrides()
+
+    if not p["available"]:
+        st.info("設定ファイルが無いためプレビューできません。先に news_score_overrides.json を生成してください。")
+        return
+    if p["total"] == 0:
+        st.info("impact_score を持つ較正ニュースがありません。")
+        return
+
+    # enabled 状態の案内
+    if p["enabled"]:
+        st.warning("enabled=true ですが、v36ではプレビューのみです。本番には反映されていません。")
+    else:
+        st.success("enabled=false ですが、プレビューでは仮適用結果を表示しています。本番には反映されていません。")
+
+    def _f(v):
+        return (f"{v:+.2f}" if isinstance(v, (int, float)) else "—")
+
+    m = st.columns(5)
+    m[0].metric("対象ニュース", p["total"])
+    m[1].metric("変更される件数", p["changed"])
+    m[2].metric("平均impact before", (f'{p["avg_before"]:.2f}' if p["avg_before"] is not None else "—"))
+    m[3].metric("平均impact after", (f'{p["avg_after"]:.2f}' if p["avg_after"] is not None else "—"))
+    m[4].metric("平均delta", _f(p["avg_delta"]))
+
+    # 銘柄別 summary
+    st.markdown("**銘柄別 summary**")
+    st.dataframe(pd.DataFrame([{
+        "ticker": b["ticker"], "news_count": b["news_count"], "changed": b["changed_count"],
+        "avg_before": (f'{b["avg_before"]:.2f}' if b["avg_before"] is not None else "—"),
+        "avg_after": (f'{b["avg_after"]:.2f}' if b["avg_after"] is not None else "—"),
+        "avg_delta": _f(b["avg_delta"]),
+    } for b in p["by_ticker"]]), width='stretch', hide_index=True)
+
+    # ニュース別テーブル
+    st.markdown("**ニュース別差分**")
+    st.dataframe(pd.DataFrame([{
+        "ticker": r["ticker"], "news_date": r["news_date"],
+        "headline": (r["headline"] or "")[:40], "sentiment": r["sentiment"],
+        "categories": "/".join(r["categories"] or []),
+        "before": r["impact_before"], "after": r["impact_after"],
+        "delta": f'{r["delta"]:+d}',
+        "impact適用": ("✅" if r["impact_override_applied"] else ""),
+        "category適用": ("✅" if r["category_adjustment_applied"] else ""),
+        "sentiment_note": (r["sentiment_note"] or ""),
+    } for r in p["rows"]]), width='stretch', hide_index=True)
+
+    st.info("これは差分プレビューのみで、本番ニューススコアには反映していません。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 
