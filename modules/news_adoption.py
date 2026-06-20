@@ -792,3 +792,85 @@ def experiment_overrides_preview(records=None, cfg=None, experiment_enabled=None
         "total": len(rows), "changed": changed,
         "avg_original": avg_original, "avg_experiment": avg_experiment, "avg_delta": avg_delta,
         "rows": rows, "by_ticker": by_ticker}
+
+
+# ---------------- v38: 個別銘柄ライブニュースへ実験モードで仮適用（表示のみ・本番非接続） ----------------
+def experiment_news_items(items, cfg=None, experiment_enabled=None):
+    """個別銘柄ページのライブニュース items に overrides を実験適用した比較（表示のみ）。
+    ⚠️ 通常の news_sum / avg_impact / verdict / score・発掘スコア・ランキングには一切反映しない。
+    ライブ item のフィールド（impact / category / lean / headline / source）を使う
+    （較正データの impact_score / categories / sentiment とは名前が異なる）。
+    実験適用は cfg dict ＋ cfg.enabled is True ＋ experiment_enabled is True の3条件 AND のみ。
+    sentiment はスコア非変更（note 表示のみ）。較正JSON・overrides JSON は非改変。"""
+    if experiment_enabled is None:
+        experiment_enabled = NEWS_OVERRIDES_EXPERIMENT
+    experiment_flag = bool(experiment_enabled)
+
+    cfg = cfg if cfg is not None else load_overrides_config()
+    exists = isinstance(cfg, dict)
+    enabled = bool(cfg.get("enabled")) if exists else None
+
+    # 3段ゲート（v37 と同一）
+    if not exists:
+        applied, reason = False, "overridesなし"
+    elif enabled is not True:
+        applied, reason = False, "enabled=false"
+    elif experiment_flag is not True:
+        applied, reason = False, "experiment flag=false"
+    else:
+        applied, reason = True, "実験適用"
+
+    impact_map, category_deltas, sentiment_notes = {}, {}, {}
+    if applied:
+        for k, v in (cfg.get("impact_overrides") or {}).items():
+            if isinstance(v, int):
+                impact_map[str(k)] = v
+        for k, v in (cfg.get("category_adjustments") or {}).items():
+            if isinstance(v, int) and k:
+                category_deltas[k] = v
+        sentiment_notes = cfg.get("sentiment_notes") or {}
+
+    items = items if isinstance(items, list) else []
+    # impact が int のニュースのみ対象
+    targets = [it for it in items if isinstance(it.get("impact"), int)]
+
+    def _sent_counts():
+        c = {"bull": 0, "bear": 0, "neutral": 0}
+        for it in targets:
+            lean = it.get("lean")
+            if lean in c:
+                c[lean] += 1
+        return c
+
+    rows = []
+    for it in targets:
+        orig = it["impact"]
+        # category(単一str) -> [category] にマッピング、lean -> sentiment
+        cats = [it["category"]] if it.get("category") else []
+        sent = it.get("lean")
+        if applied:
+            exp, imp_app, cat_app = _apply_overrides_to_score(orig, cats, impact_map, category_deltas)
+            note = sentiment_notes.get(sent) if sent in sentiment_notes else None
+        else:
+            exp, imp_app, cat_app, note = orig, False, False, None
+        rows.append({
+            "headline": it.get("headline", ""), "source": it.get("source", ""),
+            "original_impact": orig, "experiment_impact": exp, "delta": exp - orig,
+            "category_adjustment_applied": cat_app, "impact_override_applied": imp_app,
+            "sentiment_note": note})
+
+    changed = sum(1 for r in rows if r["delta"] != 0)
+    avg_original = _avg1([r["original_impact"] for r in rows])
+    avg_experiment = _avg1([r["experiment_impact"] for r in rows])
+    avg_delta = _avg1([r["delta"] for r in rows])
+    # sentiment はスコア非変更 → experiment は original と同じ
+    original_sentiment = _sent_counts()
+    experiment_sentiment = dict(original_sentiment)
+
+    return {
+        "exists": exists, "enabled": enabled, "experiment_flag": experiment_flag,
+        "experiment_applied": applied, "reason": reason,
+        "total": len(rows), "changed": changed,
+        "avg_original": avg_original, "avg_experiment": avg_experiment, "avg_delta": avg_delta,
+        "original_sentiment": original_sentiment, "experiment_sentiment": experiment_sentiment,
+        "rows": rows}

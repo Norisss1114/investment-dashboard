@@ -1251,6 +1251,60 @@ def render_news(rmap, watch=None, positions=None):
             if meta:
                 st.caption("　/　".join(meta))
 
+    # 🧪 v38: 実験モードでのみ overrides を仮適用（この銘柄のニュースだけ・本番非反映）
+    _render_news_experiment(sel, news)
+
+
+def _render_news_experiment(ticker, news):
+    """v38: 個別銘柄のライブニュースに実験モードで overrides を仮適用（表示のみ・本番非接続）。
+    通常の news_sum / avg_impact / verdict / score は変更しない。"""
+    st.divider()
+    st.subheader("🧪 ニュース実験モード分析")
+    exp_on = st.checkbox("🧪 実験モードを有効化（このセッションのみ・本番非反映）",
+                         value=False, key=f"news_exp_{ticker}")
+    items = (news or {}).get("items", []) or []
+    e = nadopt_mod.experiment_news_items(items, experiment_enabled=exp_on)
+
+    def _a(v):
+        return (f"{v:.2f}" if isinstance(v, (int, float)) else "—")
+
+    def _f(v):
+        return (f"{v:+.2f}" if isinstance(v, (int, float)) else "—")
+
+    st.markdown(f'- overrides enabled：**{str(e["enabled"]).lower() if e["enabled"] is not None else "—"}**'
+                f'　／　experiment flag：**{str(e["experiment_flag"]).lower()}**'
+                f'　／　experiment applied：**{e["experiment_applied"]}**（{e["reason"]}）')
+
+    if e["experiment_applied"]:
+        st.warning("⚠️ 実験適用中：このページのニュース比較のみです。**通常の発掘スコア・ランキングには反映していません。**")
+    else:
+        st.info(f"未適用（{e['reason']}）。overrides enabled=true かつ実験モードONの両方が必要です。")
+
+    if e["total"] == 0:
+        st.caption("impact を持つニュースがありません。")
+        st.info("これは個別銘柄ニュース分析の実験表示のみです。発掘スコア・ランキングには反映していません。")
+        return
+
+    m = st.columns(4)
+    m[0].metric("対象ニュース数", e["total"])
+    m[1].metric("補正された件数", e["changed"])
+    m[2].metric("original avg impact", _a(e["avg_original"]))
+    m[3].metric("experiment avg impact", _a(e["avg_experiment"]))
+    st.caption(f'平均delta {_f(e["avg_delta"])} ｜ '
+               f'sentiment（note のみ・スコア不変）original={e["original_sentiment"]} / experiment={e["experiment_sentiment"]}')
+
+    st.markdown("**ニュース別**")
+    st.dataframe(pd.DataFrame([{
+        "headline": (r["headline"] or "")[:44], "source": r["source"],
+        "original": r["original_impact"], "experiment": r["experiment_impact"],
+        "delta": f'{r["delta"]:+d}',
+        "category適用": ("✅" if r["category_adjustment_applied"] else ""),
+        "impact適用": ("✅" if r["impact_override_applied"] else ""),
+        "sentiment_note": (r["sentiment_note"] or ""),
+    } for r in e["rows"]]), width='stretch', hide_index=True)
+
+    st.info("これは個別銘柄ニュース分析の実験表示のみです。発掘スコア・ランキングには反映していません。")
+
 
 # ============================================================ 売買プラン
 def render_plan(rmap, watch=None, positions=None):
