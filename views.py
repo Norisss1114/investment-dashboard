@@ -975,6 +975,61 @@ def _render_overrides_apply_preview():
 
     st.info("これは差分プレビューのみで、本番ニューススコアには反映していません。")
 
+    # 🧪 v37: 実験モードでのみ overrides を仮適用した比較（表示のみ・本番非接続）
+    _render_overrides_experiment()
+
+
+def _render_overrides_experiment():
+    """v37: 実験モード時のみ overrides を仮適用して original/experiment を比較（表示のみ・本番非接続）。"""
+    st.divider()
+    st.subheader("🧪 News Overrides Experiment")
+    exp_on = st.checkbox("🧪 実験モードを有効化（このセッションのみ・本番非反映）", value=False, key="nover_exp_toggle")
+    e = nadopt_mod.experiment_overrides_preview(experiment_enabled=exp_on)
+
+    def _f(v):
+        return (f"{v:+.2f}" if isinstance(v, (int, float)) else "—")
+
+    def _a(v):
+        return (f"{v:.2f}" if isinstance(v, (int, float)) else "—")
+
+    st.markdown(f'- overrides file exists：**{e["exists"]}**')
+    st.markdown(f'- overrides enabled：**{str(e["enabled"]).lower() if e["enabled"] is not None else "—"}**')
+    st.markdown(f'- experiment flag：**{str(e["experiment_flag"]).lower()}**')
+    st.markdown(f'- experiment applied：**{e["experiment_applied"]}**（{e["reason"]}）')
+
+    if e["experiment_applied"]:
+        st.warning("⚠️ 実験適用中：較正データ上での比較のみです。**通常の発掘スコア・ランキングには反映していません。**")
+    else:
+        st.info(f"未適用（{e['reason']}）。enabled=true かつ実験モードONの両方が必要です。")
+
+    if e["total"] == 0:
+        st.caption("impact_score を持つ較正ニュースがありません。")
+        st.info("これは実験モード表示のみです。通常の発掘スコア・ランキングには反映していません。")
+        return
+
+    m = st.columns(5)
+    m[0].metric("target news", e["total"])
+    m[1].metric("changed", e["changed"])
+    m[2].metric("avg original", _a(e["avg_original"]))
+    m[3].metric("avg experiment", _a(e["avg_experiment"]))
+    m[4].metric("avg delta", _f(e["avg_delta"]))
+
+    st.markdown("**銘柄別**")
+    st.dataframe(pd.DataFrame([{
+        "ticker": b["ticker"], "original_avg": _a(b["original_avg"]),
+        "experiment_avg": _a(b["experiment_avg"]), "delta": _f(b["delta"]),
+    } for b in e["by_ticker"]]), width='stretch', hide_index=True)
+
+    st.markdown("**ニュース別**")
+    st.dataframe(pd.DataFrame([{
+        "ticker": r["ticker"], "news_date": r["news_date"],
+        "headline": (r["headline"] or "")[:40],
+        "original": r["original_score"], "experiment": r["experiment_score"],
+        "delta": f'{r["delta"]:+d}', "applied_reason": r["applied_reason"],
+    } for r in e["rows"]]), width='stretch', hide_index=True)
+
+    st.info("これは実験モード表示のみです。通常の発掘スコア・ランキングには反映していません。")
+
 
 _NADOPT_STATUS_COLOR = {"candidate": "#64748b", "approved": "#16a34a", "rejected": "#dc2626"}
 

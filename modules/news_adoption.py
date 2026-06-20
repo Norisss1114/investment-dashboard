@@ -21,6 +21,7 @@ from modules import storage, news_calibration as ncal
 PATH = "user_data/news_adoption_candidates.json"
 OVERRIDES_PATH = "user_data/news_score_overrides.json"  # v33: 設定ファイル（生成のみ・本番未読込）
 MIN_SAMPLE = 3  # n>=3 のみ候補化（low_sample は保存しない）
+NEWS_OVERRIDES_EXPERIMENT = False  # v37: 実験モードフラグ（デフォルト false=絶対未適用）
 
 
 # ---------------- 保存・読込（壊れても落ちない） ----------------
@@ -712,3 +713,82 @@ def preview_apply_overrides(records=None, cfg=None):
             "total": len(rows), "changed": changed,
             "avg_before": avg_before, "avg_after": avg_after, "avg_delta": avg_delta,
             "rows": rows, "by_ticker": by_ticker}
+
+
+# ---------------- v37: 実験モードでのみ overrides を仮適用（表示のみ・本番非接続・JSON非改変） ----------------
+def experiment_overrides_preview(records=None, cfg=None, experiment_enabled=None):
+    """実験モード時のみ overrides を較正ニュースへ仮適用し original/experiment を比較（表示のみ）。
+    ⚠️ 通常のニューススコア・発掘スコア・ランキングには一切反映しない（本番非接続）。
+    実験適用は cfg が dict ＋ cfg.enabled is True ＋ experiment_enabled is True の3条件 AND のみ。
+    それ以外は未適用（experiment_score=original, delta=0）。較正JSON・overrides JSON は非改変。"""
+    if experiment_enabled is None:
+        experiment_enabled = NEWS_OVERRIDES_EXPERIMENT
+    experiment_flag = bool(experiment_enabled)
+
+    cfg = cfg if cfg is not None else load_overrides_config()
+    exists = isinstance(cfg, dict)
+    enabled = bool(cfg.get("enabled")) if exists else None
+
+    # 3段ゲート（すべて満たした時だけ実験適用）
+    if not exists:
+        applied, reason = False, "overridesなし"
+    elif enabled is not True:
+        applied, reason = False, "enabled=false"
+    elif experiment_flag is not True:
+        applied, reason = False, "experiment flag=false"
+    else:
+        applied, reason = True, "実験適用"
+
+    # 仮適用マップ（実験適用時のみ使用）
+    impact_map, category_deltas = {}, {}
+    if applied:
+        for k, v in (cfg.get("impact_overrides") or {}).items():
+            if isinstance(v, int):
+                impact_map[str(k)] = v
+        for k, v in (cfg.get("category_adjustments") or {}).items():
+            if isinstance(v, int) and k:
+                category_deltas[k] = v
+
+    recs = records if records is not None else ncal.load()
+    if not isinstance(recs, list):
+        recs = []
+    targets = [r for r in recs if isinstance(r.get("impact_score"), int)]
+
+    rows = []
+    for r in targets:
+        orig = r["impact_score"]
+        if applied:
+            exp, _imp_app, _cat_app = _apply_overrides_to_score(orig, r.get("categories") or [],
+                                                                impact_map, category_deltas)
+            row_reason = "実験適用"
+        else:
+            exp, row_reason = orig, reason
+        rows.append({
+            "ticker": r.get("ticker"), "news_date": r.get("news_date"),
+            "headline": r.get("headline", ""),
+            "original_score": orig, "experiment_score": exp, "delta": exp - orig,
+            "applied_reason": row_reason})
+
+    changed = sum(1 for r in rows if r["delta"] != 0)
+    avg_original = _avg1([r["original_score"] for r in rows])
+    avg_experiment = _avg1([r["experiment_score"] for r in rows])
+    avg_delta = _avg1([r["delta"] for r in rows])
+
+    by = {}
+    for r in rows:
+        by.setdefault(r["ticker"], []).append(r)
+    by_ticker = []
+    for t, lst in by.items():
+        by_ticker.append({
+            "ticker": t,
+            "original_avg": _avg1([x["original_score"] for x in lst]),
+            "experiment_avg": _avg1([x["experiment_score"] for x in lst]),
+            "delta": _avg1([x["delta"] for x in lst])})
+    by_ticker.sort(key=lambda x: -abs(x["delta"] if x["delta"] is not None else 0))
+
+    return {
+        "exists": exists, "enabled": enabled, "experiment_flag": experiment_flag,
+        "experiment_applied": applied, "reason": reason,
+        "total": len(rows), "changed": changed,
+        "avg_original": avg_original, "avg_experiment": avg_experiment, "avg_delta": avg_delta,
+        "rows": rows, "by_ticker": by_ticker}
