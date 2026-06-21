@@ -8,11 +8,17 @@ import os
 import re
 import json
 import base64
+import io
 
 import config
 from modules import portfolio
 
 MOOMOO_FIELDS = ["ticker", "name", "quantity", "average_cost", "current_price", "market_value"]
+
+# v59: Anthropic Vision 安全側パラメータ（長辺の上限・再エンコード形式）
+_VISION_MAX_EDGE = 1568          # Anthropic はこれ以上を自動縮小。事前に揃えてサイズ超過/不一致を防ぐ
+_VISION_OUTPUT_FORMAT = "PNG"    # 再エンコード形式（媒体タイプは _VISION_OUTPUT_MEDIA に固定一致させる）
+_VISION_OUTPUT_MEDIA = "image/png"
 
 
 def vision_available() -> bool:
@@ -20,12 +26,49 @@ def vision_available() -> bool:
     return bool(config.get_secret("ANTHROPIC_API_KEY"))
 
 
+def _normalize_image_for_vision(image_bytes):
+    """v59: 画像を PIL で開いて RGB 化・長辺縮小・PNG再エンコードし、(bytes, media_type) を返す。
+    ⚠️ up.type は信用せず、実際に再エンコードした形式に media_type を一致させる
+    （media_type 不一致による BadRequestError と、サイズ過大による 400 を同時に防ぐ）。
+    開けない/壊れている場合は (None, 理由) を返す（画像base64やキーはログに出さない）。"""
+    if not image_bytes:
+        return None, "画像データが空です"
+    try:
+        from PIL import Image
+    except Exception:
+        # Pillow が無い環境では正規化を諦め、元バイトをそのまま使う（media_type は不明なので png 既定）
+        return image_bytes, _VISION_OUTPUT_MEDIA
+    try:
+        im = Image.open(io.BytesIO(image_bytes))
+        im.load()  # 破損画像はここで例外
+    except Exception as e:
+        return None, f"画像を開けませんでした（{type(e).__name__}）。別の画像か手入力をご利用ください。"
+    try:
+        # 透過や CMYK 等を含めて RGB に統一（PNG/JPEG どちらでも安全に再エンコードできる）
+        if im.mode != "RGB":
+            im = im.convert("RGB")
+        # 長辺が大きければ縮小（アスペクト比維持）
+        w, h = im.size
+        long_edge = max(w, h)
+        if long_edge > _VISION_MAX_EDGE:
+            scale = _VISION_MAX_EDGE / float(long_edge)
+            im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+        buf = io.BytesIO()
+        im.save(buf, format=_VISION_OUTPUT_FORMAT)
+        return buf.getvalue(), _VISION_OUTPUT_MEDIA
+    except Exception as e:
+        return None, f"画像の変換に失敗しました（{type(e).__name__}）。手入力をご利用ください。"
+
+
 def empty_row():
     return {k: ("" if k in ("ticker", "name") else 0) for k in MOOMOO_FIELDS}
 
 
 def parse_screenshot(image_bytes, media_type="image/png"):
-    """画像から保有を抽出。返り値 (rows, error)。失敗時 rows=[]。"""
+    """画像から保有を抽出。返り値 (rows, error)。失敗時 rows=[]。
+    v59: 画像を正規化（RGB化・縮小・PNG再エンコード）してから送信し、media_type 不一致と
+    サイズ過大による BadRequestError を防ぐ。失敗時は Anthropic の詳細本文を表示する
+    （⚠️ APIキー・画像base64は決してメッセージ/ログに含めない）。"""
     key = config.get_secret("ANTHROPIC_API_KEY")
     if not key:
         return [], "ANTHROPIC_API_KEY未設定（手入力補助モード）"
@@ -33,8 +76,15 @@ def parse_screenshot(image_bytes, media_type="image/png"):
         import anthropic
     except Exception:
         return [], "anthropicライブラリ未導入です（pip install anthropic）。手入力をご利用ください。"
+
+    # v59: up.type は信用せず、実バイトから正規化して media_type を一致させる
+    norm_bytes, norm_media = _normalize_image_for_vision(image_bytes)
+    if norm_bytes is None:
+        # norm_media には理由テキストが入る（破損/非対応/変換失敗）。手入力へ誘導。
+        return [], f"画像を解析できませんでした: {norm_media}"
+
     try:
-        b64 = base64.b64encode(image_bytes).decode()
+        b64 = base64.b64encode(norm_bytes).decode()
         client = anthropic.Anthropic(api_key=key)
         prompt = (
             "これはMoomooの保有銘柄(ポジション)画面のスクリーンショットです。"
@@ -45,7 +95,7 @@ def parse_screenshot(image_bytes, media_type="image/png"):
         msg = client.messages.create(
             model=getattr(config, "ANTHROPIC_MODEL", "claude-sonnet-4-6"), max_tokens=2000,
             messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}},
+                {"type": "image", "source": {"type": "base64", "media_type": norm_media, "data": b64}},
                 {"type": "text", "text": prompt}]}])
         text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
         m = re.search(r"\[.*\]", text, re.S)
@@ -59,7 +109,29 @@ def parse_screenshot(image_bytes, media_type="image/png"):
             return [], "保有銘柄を読み取れませんでした。手入力してください。"
         return rows, None
     except Exception as e:
-        return [], f"画像解析に失敗しました: {type(e).__name__}. 手入力をご利用ください。"
+        # v59: 原因が分かるよう Anthropic の詳細本文（BadRequestError.message 等）も含める。
+        #      ただし API キー・画像base64 は含めない（_safe_api_error が秘匿を担保）。
+        return [], f"画像解析に失敗しました: {_safe_api_error(e)} 手入力をご利用ください。"
+
+
+def _safe_api_error(e) -> str:
+    """v59: 例外から表示用の安全なメッセージを作る。
+    ⚠️ APIキーや画像base64がメッセージに混ざらないよう、既知パターンを除去/切り詰める。"""
+    name = type(e).__name__
+    detail = ""
+    # Anthropic SDK の例外は .message に 400 の理由本文を持つことが多い
+    msg = getattr(e, "message", None)
+    if isinstance(msg, str) and msg.strip():
+        detail = msg.strip()
+    else:
+        detail = str(e).strip()
+    # 念のための秘匿：キーらしき文字列や base64 巨大塊を除去し、長さも制限する
+    key = config.get_secret("ANTHROPIC_API_KEY")
+    if key and detail:
+        detail = detail.replace(key, "***")
+    if len(detail) > 300:
+        detail = detail[:300] + "…"
+    return f"{name}: {detail}" if detail else f"{name}."
 
 
 def _num(v):
